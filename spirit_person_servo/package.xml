@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>spirit_person_servo</name>
+  <version>0.0.1</version>
+  <description>Onboard person detection and gimbal servoing for Spirit drones.</description>
+  <maintainer email="juvanjos@andrew.cmu.edu">James Emilian</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>spirit_person_servo_msgs</exec_depend>
+
+  <!-- Gimbal telemetry (GimbalState). Optional at runtime: the node degrades to
+       no tilt guard and no angle backend if it is missing, but the angle backend
+       needs it, so it is declared here and in version_control/spirit_drivers.yaml. -->
+  <exec_depend>lion_ros2_bridge</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

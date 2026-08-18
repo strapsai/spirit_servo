@@ -1,0 +1,99 @@
+# Person servoing config for spiritnx3.
+#
+# Bring-up defaults are deliberately timid. Two gates must be cleared before this
+# node can move anything:
+#   1. servo_backend must be something other than dry_run, AND
+#   2. sign_calibration_verified must be true (the node forces dry_run otherwise).
+#
+# Do the sign calibration on a bench with the props removed. See the plan's
+# staged bring-up section.
+/**:
+  ros__parameters:
+    robot_name: "spiritnx3"
+    gimbal_namespace: "/spiritnx3/gremsy"
+
+    # Left unset on purpose: the node derives it from $AIRLAB_PATH, which differs
+    # between the basestation (/home/dtc) and the drone (/home/airlab). Hardcoding
+    # it here silently fell back to nominal intrinsics on the drone.
+    # intrinsics_file: <derived from $AIRLAB_PATH>
+
+    # dry_run | track_touch | angle | rate | single_axis_rate
+    #   angle       -- absolute setpoints, safest, works on today's driver
+    #   track_touch -- payload's own hardware tracker, no tuning needed
+    #   rate        -- needs cmd/gimbal_rate added to gremsy_ros2 first
+    # single_axis_rate/pan is the only two-way-safe path today: cmd/gimbal_pan is
+    # a bounded rate command with no frame ambiguity. "angle" stays gated off
+    # until the yaw frame is resolved (a +3 deg setpoint produced a 202 deg slew).
+    servo_backend: "single_axis_rate"
+    single_axis: "pan"
+    detector_backend: "yolo"
+    image_source: "rtsp"
+
+    rtsp_url: "rtsp://192.168.70.23:8554/payload"
+    rtsp_latency_ms: 100
+    rtsp_hardware_decode: false   # nvvidconv needs EGL; headless drone has none
+    replay_video: ""
+    replay_fps: 10.0
+
+    # Absolute path to the weights baked into the image at build time. A bare
+    # "yolo11n.pt" makes ultralytics re-download into the CWD at every launch,
+    # which fails outright on a drone with no internet.
+    yolo_weights: "/opt/person_servo/weights/yolo11n.pt"
+    yolo_imgsz: 640
+    yolo_confidence: 0.35
+    yolo_device: "cuda:0"
+    yolo_half: true
+
+    detect_rate_hz: 10.0
+    control_rate_hz: 20.0
+
+    # Measured on the bench, never guessed. Two independent unknowns:
+    # command -> gimbal motion, and gimbal motion -> pixel motion.
+    # Measured on spiritnx3 by run_sign_calibration (rate probes + phase
+    # correlation). Cross-check: ~25 px/deg measured vs 24 px/deg predicted from
+    # fy=1375. Re-run per airframe -- do not assume the three gimbals match.
+    pan_sign: 1.0
+    tilt_sign: -1.0
+    sign_calibration_verified: true
+
+    # Angle backend: commands current + kp * error, clamped per step.
+    angle_kp: 0.4
+    max_step_deg: 3.0
+
+    # Rate backend: kp is dimensionless (1.2 ~= a 1.2 s error time constant).
+    rate_kp: 1.2
+    rate_ki: 0.15
+    max_rate_dps: 3.0      # raise to 10 then 20 only after bench tuning
+    max_accel_dps2: 15.0
+
+    tilt_min_deg: -90.0
+    tilt_max_deg: 20.0
+
+    # 25/60 px on a 1920-wide frame is 1.0 deg / 2.5 deg: tight enough to keep the
+    # person well inside frame, loose enough that detector jitter never wakes the
+    # loop.
+    enter_deadband_px: 25.0
+    exit_deadband_px: 60.0
+    hold_confirm_s: 0.4
+    exit_confirm_s: 0.15
+
+    image_timeout_s: 1.0
+    detection_timeout_s: 0.5
+    gimbal_timeout_s: 1.0
+    search_timeout_s: 15.0
+    lost_timeout_s: 8.0
+    max_session_s: 900.0    # 15 min for bench work; tighten for flight
+
+    # LOCK holds an earth-frame attitude, which is what makes settle-and-hold
+    # correct while the airframe moves. Restored on disarm.
+    # NOTE: cmd/gimbal_mode uses the PAYLOAD_CAMERA_GIMBAL_MODE_* enum
+    # (0=OFF 1=LOCK 2=FOLLOW 3=MAPPING 4=RESET), which is NOT GimbalState.mode's
+    # enum (0=UNSPECIFIED 1=FOLLOW 2=LOCK ...). Do not cross-assign them.
+    set_lock_mode: true
+    restore_gimbal_mode: 2      # FOLLOW
+
+    publish_debug_image: false
+    # Live annotated view in a browser: http://<drone-ip>:8099/
+    # Independent of ROS domains, so the basestation can watch without a bridge.
+    mjpeg_port: 8099
+    debug_every_n: 2
