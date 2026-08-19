@@ -1,5 +1,172 @@
 # Person Servoing Module — Implementation Plan
 
+> **STATUS 2026-08-18 — Phase 1 is built and working on spiritnx3.** Closed-loop pan
+> servoing onto a detected person, running onboard, no DB and no re-ID.
+>
+> **Several assumptions in the design below were falsified on hardware.** Read
+> "Field results" before trusting §D, §G, §I or §J. In particular: two-axis rate
+> servoing as specified in §G is *impossible* against the current driver, and the
+> absolute-angle alternative caused a 202° uncommanded slew. Code now lives in
+> `strapsai/spirit_servo`.
+
+---
+
+# Field results — 2026-08-18 (≈3 h on hardware)
+
+## What was built
+
+| Piece | State |
+|---|---|
+| `spirit_servo` repo: `spirit_person_servo` + `_msgs`, 27 files | working, **65 unit tests green** |
+| `nx/06e-jp6.1-person-servo.dockerfile` (YOLO + BoT-SORT, arm64) | built on nx-03 |
+| RTSP → YOLO11n → BoT-SORT → target select → PID → gimbal | **closed loop, converges and holds** |
+| MJPEG debug view (`http://<drone>:8099/`) | working, domain-independent |
+| Rate-probe sign calibration with abort interlocks | working |
+| `gimbal_deadman_node` | written, **never fault-tested** |
+
+**Measured on spiritnx3:** YOLO11n p50 **32 ms** / p95 47 ms on GPU · RTSP 1080p BGR
+at **29.8 fps** concurrent with the basestation feed · person detected at 0.94 conf ·
+180 s closed-loop session, 3599 samples: reached HOLD, best error **0 px**, ~100° of
+pan exercised, **0 violations** of the `IDLE/HOLD/LOST ⟹ actuation idle` invariant.
+
+## Design assumptions that were WRONG
+
+**1. §G's two-axis rate servoing cannot work.** `cmd/gimbal_tilt` and `cmd/gimbal_pan`
+both map to one `setGimbalSpeed(pitch, roll, yaw, INPUT_SPEED)` call that writes all
+three angular velocities into a single mavlink message
+(`payloadSdkInterface.cpp:1176-1179`). Tilt forces yaw=0; pan forces pitch=0. Publishing
+both alternates and cancels. Only **single-axis** rate control works today; two-axis
+needs a new `cmd/gimbal_rate` (Vector3, INPUT_SPEED) topic in `gremsy_ros2`.
+
+**2. Absolute-angle control is unsafe until the yaw frame is resolved.** In LOCK,
+`gimbal_state.pan_deg` reports `packet.yaw_absolute` (earth frame,
+`payloadSdkInterface.cpp:1699`); `cmd/gimbal_angle` INPUT_ANGLE expects **body** yaw.
+Feeding one back as the other made `current_pan + 3°` into a **202° slew**, after which
+the gimbal hunted until a payload power cycle. The `angle` backend is now gated behind
+`angle_frame_verified` and clamps every setpoint to `max_angle_jump_deg` of the measured
+angle. §G's settle-and-hold via absolute angle is **unusable** until this is fixed.
+Note `cmd/gimbal_angle` carries all three axes, so there is no "tilt-only" angle command.
+
+**3. §I open item #2 resolved: the payload DOES accept concurrent RTSP sessions.** A
+second client pulls 1080p at 30 fps while `sender.cpp` streams to the basestation, with
+no effect on it. **Option B wins; Option A is unnecessary** — no need to touch
+`sender.cpp` or its `exit(1)` watchdog at all. That removes the largest coordination
+risk in the original plan.
+
+**4. The payload boots in IR, not EO.** `cmd/toggle_eo_ir` (false=EO) switches it. The IR
+stream is greyscale and **pillarboxed** — content only spans x∈[310,1600] of 1920 — so
+the EO intrinsics (`cx=933`) would have been silently wrong. Always assert EO before
+trusting pixel→angle.
+
+**5. A long-running container loses CUDA.** `dtc-drivers_ros2` reports
+`device_count 0` / `Error 801: operation not supported`, while a *freshly started*
+container on the same host gets the GPU. This is why the servo node runs in its own
+container (`06e`) rather than as another tmuxp window in the drivers image.
+
+**6. Hardware decode needs EGL, which a headless drone lacks.** `nvvidconv` fails with
+"Could not get EGL display connection". Software `avdec_h264` handles 1080p at 30 fps
+comfortably — well past the 10 Hz the loop needs.
+
+**7. `cv2.VideoCapture` silently fails on a named appsink.** `appsink name=aisink` makes
+`isOpened()` return False with no error. It must be a bare `appsink`.
+
+**8. Config drift is real.** The drone's `spiritnx3_eo.yaml` uses flat `intrinsics:` (not
+`intrinsics_by_zoom:`) and *does* carry `camera_extrinsic_rpy: [90, 0, 90]`. The loader
+now accepts both schemas. `$AIRLAB_PATH` also differs (`/home/dtc` vs `/home/airlab`), so
+never hardcode it in config.
+
+## Process lessons (these cost the most time)
+
+**Calibrate with rate probes, never angle probes.** A rate command is bounded by
+`rate × time` — 2 °/s for 1 s is 2° of travel however wrong the convention is. An
+absolute-angle probe is unbounded when the frame is wrong. This single choice is the
+difference between a 2° mistake and the 202° slew.
+
+**A diagnostic is not an interlock.** The first calibration *computed* the
+command→motion ratio (67.61) and **printed it after the fact**, then ran the next probe
+anyway. The check existed; it just wasn't wired to stop anything. Gates must abort
+before the next actuation.
+
+**Never measure camera motion from a detected bbox.** The person's box was clipped at the
+frame edge, pinning its centroid, and human sway swamped the few pixels a small probe
+produces — forward and reverse probes both returned the same sign, which is physically
+impossible. Global **phase correlation** over the whole frame is the right instrument:
+no detector needed, immune to the subject moving.
+
+**Magnitude agreement does not validate sign.** The scene-shift measurement matched
+theory beautifully — 25 px/deg measured vs 24 px/deg predicted from `fy=1375` — and that
+gave false confidence while the *sign* was inverted, driving the gimbal away from the
+target. The inversion came from negating the scene shift on the reasoning "the scene
+moves opposite to the target"; the target **is** part of the scene. Three regression
+tests now assert the control intent directly ("a positive error must produce a command
+that reduces it") rather than re-encoding the formula.
+
+**Check parameter interactions, not just parameters.** `max_coast_s` (0.4 s) plus the
+acquisition vote (0.3 s) exceeded `detection_timeout_s` (0.5 s), so every BoT-SORT
+track-ID change produced a spurious `SERVOING → LOST`. Fixed by separating "did we see
+anybody" from "did we pick a target".
+
+**Config that silently does nothing is worse than no config.** `set_lock_mode` and
+`restore_gimbal_mode` were declared and documented but never passed to the backends.
+
+**Prefer the library with the hard part already solved.** The plan specified a
+hand-rolled `SimpleTracker`. BoT-SORT was chosen instead specifically for **camera motion
+compensation** — this loop slews the camera on purpose, so the frame shifts exactly when
+association is hardest. That is the regime where naive IoU matching is worst.
+
+---
+
+# TODO — next session
+
+**1. PID tuning.** The command was **saturated at `max_rate_dps: 3.0` for 67% of servo
+time**, so `Kp` was barely in play and the loop was effectively bang-bang. Raise the
+bring-up clamp (→10, then 20) and `max_accel_dps2` (15 is sluggish) *before* touching
+gains. Gains are now live-tunable via `ros2 param set` (no 40 s restart), and
+`tools/`-style step-response measurement should drive the values rather than feel.
+
+**2. Swap in the RFDETR person detector** (Joon and Winston are training it) for much
+higher detection quality than stock YOLO11n on COCO `person`. This is a
+`detector_backend` registry entry plus a class implementing `PersonDetector.detect()` —
+no changes to the node, tracker, controller or state machine. Note
+`reid_ws/src/triage-mapping-reid/triage_mapping/rfdetr_detect.py` already exists as a
+starting point. Bench it against YOLO11n on the same replayed frames for p50/p95 latency
+and recall on prone/aerial subjects, since a slower-but-better detector may still win on
+time-to-lock.
+
+**3. Resolve the gimbal yaw frame.** Determine what frame `cmd/gimbal_angle` INPUT_ANGLE
+expects (likely body yaw = telemetry yaw in FOLLOW, since LOCK switches telemetry to
+`yaw_absolute`). Verify with a *bounded rate* probe, then set `angle_frame_verified`.
+Unlocks the angle backend and its big safety advantage: a dropped command holds position
+instead of slewing.
+
+**4. Open the `cmd/gimbal_rate` PR to `gremsy_ros2`** — two additive lines mirroring the
+existing `CMD_GIMBAL_ANGLE` handler. Unlocks true two-axis rate servoing.
+
+**5. Wire the tilt axis.** Only pan is driven today (`single_axis: pan`).
+`tilt_sign = -1.0` is measured and ready; it needs either item 3 or item 4 first.
+
+**6. Fault-inject the deadman — not yet done, and not optional.** `kill -9` the node
+mid-servo and unplug RTSP; confirm the gimbal stops. "Keeps slewing after the node died"
+is only findable by actually killing the node.
+
+**7. Bench `track_touch`** against `rate_pid`. It needs no signs, no frames and no tuning,
+and may simply be better for a stationary casualty.
+
+**8. Re-run sign calibration per airframe.** The committed signs are spiritnx3-only; nx1
+and nx2 are unmeasured. Do not assume the three gimbals are mounted identically.
+
+**9. Phase 2: re-ID.** Everything from §A onward still stands. Only
+`target_selector.py` changes — "largest bbox + continuity" becomes "score every track
+against the gallery, take the best above tau".
+
+## Still open from the original §O
+
+Item 2 (RTSP concurrency) is **resolved — yes**. Item 5 (is `zoom_level` linear?) is
+untested; the drone's EO config says 1× is the only supported zoom, which sidesteps it
+for now. Items 1, 3, 4, 6, 7 are untouched and all belong to Phase 2.
+
+---
+
 ## Context
 
 When a Spirit drone is tasked to inspect a specific casualty, it currently receives only an
