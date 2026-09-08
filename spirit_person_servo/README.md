@@ -105,9 +105,12 @@ Two consequences worth knowing:
   Ownership follows the **state**; `actuation_idle` answers only "has it
   stopped slewing yet", which is what the release wait needs.
 
-The whole feature is one switch on the aircraft: `SPIRIT_PERSON_SERVO=true` in
-`airlab.env` both creates this container (`launch/spirit/spirit-containers.sh`)
-and turns on the pointer's `servo_enabled`.
+This container comes up with the rest of the Spirit payload stack
+(`launch/spirit/spirit-containers.sh`), brought up separately and allowed to
+fail so a missing servo image cannot take MAVROS down with it. Whether the
+pointer actually hands over is `servo_enabled` in ITS per-drone config, default
+true — not an `airlab.env` variable, because this is part of the payload stack
+rather than a per-deployment choice.
 
 ## Quick start
 
