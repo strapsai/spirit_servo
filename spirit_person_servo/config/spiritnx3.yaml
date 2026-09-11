@@ -20,10 +20,40 @@
     # dry_run | track_touch | angle | rate | single_axis_rate
     #   angle       -- absolute setpoints, safest, works on today's driver
     #   track_touch -- payload's own hardware tracker, no tuning needed
-    #   rate        -- needs cmd/gimbal_rate added to gremsy_ros2 first
+    #   rate        -- two-axis rate; cmd/gimbal_rate NOW EXISTS in gremsy_ros2
     # single_axis_rate/pan is the only two-way-safe path today: cmd/gimbal_pan is
     # a bounded rate command with no frame ambiguity. "angle" stays gated off
     # until the yaw frame is resolved (a +3 deg setpoint produced a 202 deg slew).
+    #
+    # UNCHANGED ON PURPOSE (2026-09-08). This value is the one that has actually
+    # flown, and the two paths to a SECOND (tilt) axis both need a measurement
+    # nobody has taken yet. `tilt_sign: -1.0` below is measured and waiting.
+    #
+    #   (a) servo_backend: "rate" -- cmd/gimbal_rate landed in gremsy_ros2 on
+    #       lorenzo/person-servo-inspection (Vector3 pitch/roll/yaw in deg/s,
+    #       mirroring cmd/gimbal_angle, with ensureGimbalMode() asserted first
+    #       -- which the pre-existing cmd/gimbal_tilt and cmd/gimbal_pan
+    #       handlers did NOT do, so THIS backend was stowable by an unrelated
+    #       zoom write until that fix). RateBackend refuses to arm when nothing
+    #       is subscribed, so a stale driver degrades loudly. Needs: rebuild
+    #       gremsy_ros2 on the aircraft, then a bench run confirming both axes
+    #       converge. No new sign measurement -- the signs are per axis and both
+    #       are recorded below.
+    #
+    #   (b) servo_backend: "angle" -- better failure mode (a dropped command
+    #       HOLDS instead of slewing), and it is what the gimbal pointer already
+    #       uses. Still gated on angle_frame_verified. HYPOTHESIS worth testing
+    #       first, written down because it has not been tested: the 202 deg slew
+    #       happened in LOCK, where gimbal_state.pan_deg reports yaw_absolute
+    #       (earth frame) while cmd/gimbal_angle INPUT_ANGLE wants BODY yaw. In
+    #       FOLLOW both are body-frame -- which is exactly the pairing
+    #       spirit_task_executor's gimbal_pointing has flown for weeks
+    #       (gimbal_yaw_frame: body + the driver's gimbal_mode: follow). So try
+    #       set_lock_mode: false BEFORE trusting the angle backend, and it also
+    #       removes the mode flip from the pointer/servo handover entirely.
+    #       Verify with a BOUNDED RATE PROBE, never an angle probe -- that one
+    #       choice is the difference between a 2 deg mistake and the 202 deg
+    #       slew. Only then set angle_frame_verified: true.
     servo_backend: "single_axis_rate"
     single_axis: "pan"
     detector_backend: "yolo"

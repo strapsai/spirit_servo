@@ -5,9 +5,20 @@
 >
 > **Several assumptions in the design below were falsified on hardware.** Read
 > "Field results" before trusting §D, §G, §I or §J. In particular: two-axis rate
-> servoing as specified in §G is *impossible* against the current driver, and the
+> servoing as specified in §G was *impossible* against the driver as it stood, and the
 > absolute-angle alternative caused a 202° uncommanded slew. Code now lives in
 > `strapsai/spirit_servo`.
+>
+> **UPDATE 2026-09-08 — the servo is now wired into an inspection.** It is no longer a
+> standalone loop somebody starts by hand: `spirit_task_executor`'s `gimbal_pointing`
+> node arbitrates the gimbal between its geometric aim and this servo, arming it a
+> couple of seconds into `INSPECTING` and taking the camera back the instant the servo
+> is not driving. See "Who arms it, on an aircraft" in
+> `spirit_person_servo/README.md`, and `servo_arbiter.py` in that package for the rule.
+> §K's deployment plan is superseded in two places: the servo gets its OWN container
+> and tmuxp (`launch/spirit/person-servo.{sh,yaml}`, image tier `06e`), not a window in
+> `dtc-drivers.yaml` — field result #5 about CUDA is why — and no domain-bridge entries
+> are needed, because nothing about phase 1 crosses to the basestation.
 
 ---
 
@@ -139,11 +150,35 @@ expects (likely body yaw = telemetry yaw in FOLLOW, since LOCK switches telemetr
 Unlocks the angle backend and its big safety advantage: a dropped command holds position
 instead of slewing.
 
-**4. Open the `cmd/gimbal_rate` PR to `gremsy_ros2`** — two additive lines mirroring the
-existing `CMD_GIMBAL_ANGLE` handler. Unlocks true two-axis rate servoing.
+> **Still open, and now written into `config/spiritnx3.yaml` as a hypothesis rather
+> than left as a hunch.** The suspicion above is almost certainly right, and there is
+> independent evidence for it that this document did not have: `spirit_task_executor`'s
+> `gimbal_pointing` has been flying absolute `INPUT_ANGLE` commands for weeks with
+> `gimbal_yaw_frame: body` paired against the driver's `gimbal_mode: follow`, and its
+> README states the pairing as one decision in two files. So the fix is likely
+> `set_lock_mode: false` — stay in FOLLOW — not a change to the command. That would
+> also remove the mode flip from the pointer/servo handover, leaving both controllers
+> in one mode and one frame, so a handover changes only the SOURCE of the angles.
+> Nothing here is measured, `angle_frame_verified` is deliberately still unset, and it
+> must be checked with a **bounded rate probe** — an angle probe is what cost the
+> 202°.
+
+**4. ~~Open the `cmd/gimbal_rate` PR to `gremsy_ros2`~~ — DONE 2026-09-08** on
+`gremsy_ros2` `lorenzo/person-servo-inspection`: `CMD_GIMBAL_RATE`
+(`geometry_msgs/Vector3`, pitch/roll/yaw in deg/s) mirroring `CMD_GIMBAL_ANGLE`
+with `INPUT_SPEED`. It came with a defect fix that matters more than the feature:
+`cmd/gimbal_tilt`, `cmd/gimbal_pan` and `cmd/gimbal_angle` all called
+`setGimbalSpeed` WITHOUT `ensureGimbalMode()`, unlike `onGimbalCommand` — so the
+`single_axis_rate` backend **in use today** could be stowed by any unrelated
+camera-parameter write, self-sustainingly (`payloadSdkInterface.cpp:184`,
+`GIMBAL_MODE_OFF == ZOOM_COMBINE_1X == 0` → `RETRACT`). All four now assert the
+mode first. STILL OWED: rebuild the driver on the aircraft and bench both axes.
 
 **5. Wire the tilt axis.** Only pan is driven today (`single_axis: pan`).
-`tilt_sign = -1.0` is measured and ready; it needs either item 3 or item 4 first.
+`tilt_sign = -1.0` is measured and ready; it needed either item 3 or item 4 first, and
+**item 4 has landed** — so `servo_backend: "rate"` is now the shortest path to two
+axes and needs no new sign measurement. Not flipped in the committed config, because
+it has never been run against the payload.
 
 **6. Fault-inject the deadman — not yet done, and not optional.** `kill -9` the node
 mid-servo and unplug RTSP; confirm the gimbal stops. "Keeps slewing after the node died"
