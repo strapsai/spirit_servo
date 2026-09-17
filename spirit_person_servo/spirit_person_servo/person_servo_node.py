@@ -187,6 +187,19 @@ class PersonServoNode(Node):
         # 0 disables. Serves annotated frames over HTTP for a browser.
         self.declare_parameter("mjpeg_port", 0)
         self.declare_parameter("debug_every_n", 2)
+        # Run perception while IDLE purely to keep the debug view alive, without
+        # arming anything. OFF by default: it costs the detector's full duty
+        # cycle (detect_rate_hz) on the GPU for a picture nobody may be watching.
+        #
+        # Safe by construction rather than by care. The only path to an actuator
+        # is _on_control, which returns at IDLE before any command is formed, and
+        # the backend is engaged solely by ~/start. This flag cannot reach either.
+        #
+        # Settable at runtime, which is the point -- a bench check is
+        #   ros2 param set /<drone>/person_servo_node idle_preview true
+        # and the browser fills in, with no container restart and no ~/start
+        # (which WOULD arm the gimbal: the backend here is rate, not dry_run).
+        self.declare_parameter("idle_preview", False)
 
         # Which axis single_axis_rate drives. Only one Float64 rate topic may be
         # used at a time: cmd/gimbal_tilt and cmd/gimbal_pan each zero the other
@@ -520,7 +533,10 @@ class PersonServoNode(Node):
         """Perception: grab a frame, detect, track, select. Commands nothing."""
         with self._lock:
             running = self._state != State.IDLE
-        if not running:
+        # IDLE normally grabs no frames at all -- which is also why the debug
+        # view is blank on a parked aircraft. idle_preview overrides that for
+        # the picture only; see the parameter's note on why it cannot command.
+        if not running and not self.get_parameter("idle_preview").value:
             return
 
         latest = self._image_source.latest()

@@ -138,3 +138,10 @@
     # Independent of ROS domains, so the basestation can watch without a bridge.
     mjpeg_port: 8099
     debug_every_n: 2
+    # The view above is BLANK until an inspection arms the servo: IDLE grabs no
+    # frames. Turn this on to watch the feed and the detections on a parked
+    # aircraft -- it runs perception only and can command nothing (see the
+    # parameter's note in person_servo_node.py). Toggle it live instead of
+    # editing this file:
+    #   ros2 param set /<drone>/person_servo_node idle_preview true
+    idle_preview: false
