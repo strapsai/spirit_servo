@@ -616,7 +616,7 @@ class PersonServoNode(Node):
                 state = self._state
 
             err_x, err_y = self._err_px
-            err_mag = math.hypot(err_x, err_y)
+            err_mag = self._driven_error_px(err_x, err_y)
             should_drive = self._hold.update(err_mag, now)
 
             if not should_drive:
@@ -658,6 +658,19 @@ class PersonServoNode(Node):
                 self._transition(State.LOST, "divergence guard")
 
             self._publish_state(idle=self._actuation_idle)
+
+    def _driven_error_px(self, err_x: float, err_y: float) -> float:
+        """Pixel error the hold band, the settle stop and the divergence guard judge.
+
+        Only the axis the backend actually drives: single_axis_rate on pan cannot remove a
+        vertical offset, so with the 2-D magnitude a person centred in pan but above or
+        below the image centre never reached HOLD and pan was driven forever (spiritnx3,
+        2026-09-23: median |err_y| ~180 px against a 25-40 px band).
+        """
+        if self._backend_name == "single_axis_rate":
+            axis = str(self.get_parameter("single_axis").value).strip().lower()
+            return abs(err_y) if axis == "tilt" else abs(err_x)
+        return math.hypot(err_x, err_y)
 
     def _compute_command(self, err_x: float, err_y: float, dt: float) -> ServoCommand:
         width, height = self._frame_size
