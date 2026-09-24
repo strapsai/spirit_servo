@@ -634,8 +634,20 @@ class PersonServoNode(Node):
                 state = self._state
 
             err_x, err_y = self._err_px
-            err_mag = self._driven_error(*self._normalized(err_x, err_y))
-            should_drive = self._hold.update(err_mag, now)
+            norm_x, norm_y = self._normalized(err_x, err_y)
+            err_mag = self._driven_error(norm_x, norm_y)
+            # Both gates off = neither axis will be driven: that is centred, even when an
+            # axis coasted past its stop threshold after stopping. Without this the loop
+            # sat still in SERVOING (tilt at ~50 px, inside the gate's resume band, but
+            # outside the hold band) and never reached HOLD (spiritnx3 2026-09-23).
+            # Leaving HOLD still needs the full exit band.
+            if self._gated():
+                pan_drives = self._pan_gate.update(abs(norm_x))
+                tilt_drives = self._tilt_gate.update(abs(norm_y))
+                hold_err = err_mag if (pan_drives or tilt_drives) else 0.0
+            else:
+                hold_err = err_mag
+            should_drive = self._hold.update(hold_err, now)
 
             if not should_drive:
                 if state != State.HOLD:
@@ -687,6 +699,10 @@ class PersonServoNode(Node):
             gate.stop = enter
             gate.resume = (enter + exit_) / 2.0
 
+    def _gated(self) -> bool:
+        """Per-axis AxisGate in use: two-axis rate control with deadzone compensation."""
+        return self._pan_pid.min_rate_dps > 0.0 and self._backend_name == "rate"
+
     def _normalized(self, err_x: float, err_y: float) -> tuple[float, float]:
         """Pixel error as a fraction of the frame width, on both axes.
 
@@ -725,7 +741,7 @@ class PersonServoNode(Node):
         # Two-axis rate with deadzone compensation: an axis whose own error is already
         # inside the band stops (and forgets its integral) while the other finishes,
         # instead of being pushed past centre at min_rate_dps (AxisGate).
-        gated = self._pan_pid.min_rate_dps > 0.0 and self._backend_name == "rate"
+        gated = self._gated()
         norm_x, norm_y = self._normalized(err_x, err_y)
         if gated and not self._pan_gate.update(abs(norm_x)):
             self._pan_pid.reset()
