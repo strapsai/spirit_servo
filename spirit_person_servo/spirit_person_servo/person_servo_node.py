@@ -16,12 +16,14 @@ simulated or stepped clock cannot stall the safety timer.
 from __future__ import annotations
 
 import math
+import signal
 import os
 import threading
 import time
 from enum import IntEnum
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 import yaml
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -941,8 +943,21 @@ class PersonServoNode(Node):
             self._mjpeg.stop()
 
 
+def _raise_on_term(signum, frame):  # noqa: ARG001 - signal handler signature
+    """SIGTERM (docker stop / recreate) as KeyboardInterrupt, so the finally below runs.
+
+    rclpy's own handlers are off (SignalHandlerOptions.NO): they shut the context down
+    first, after which the stop publishes in shutdown() can no longer go out -- and the
+    Gremsy driver has no rate-command timeout, so the gimbal kept slewing at the last
+    rate after a container recreate (spiritnx3, 2026-09-23).
+    """
+    raise KeyboardInterrupt
+
+
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, _raise_on_term)
+    signal.signal(signal.SIGTERM, _raise_on_term)
     node = PersonServoNode()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
