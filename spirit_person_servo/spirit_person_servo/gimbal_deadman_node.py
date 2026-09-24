@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import os
 
+import signal
+
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from geometry_msgs.msg import Vector3
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
@@ -130,8 +133,21 @@ class GimbalDeadmanNode(Node):
         self._pan_pub.publish(Float64(data=0.0))
 
 
+def _raise_on_term(signum, frame):  # noqa: ARG001 - signal handler signature
+    """SIGTERM (docker stop / recreate) as KeyboardInterrupt, so a watchdog stop is also a clean exit.
+
+    rclpy's own handlers are off (SignalHandlerOptions.NO): they shut the context down
+    first, after which the stop publishes in shutdown() can no longer go out -- and the
+    Gremsy driver has no rate-command timeout, so the gimbal kept slewing at the last
+    rate after a container recreate (spiritnx3, 2026-09-23).
+    """
+    raise KeyboardInterrupt
+
+
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, _raise_on_term)
+    signal.signal(signal.SIGTERM, _raise_on_term)
     node = GimbalDeadmanNode()
     try:
         rclpy.spin(node)
