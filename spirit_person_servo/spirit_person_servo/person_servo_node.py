@@ -632,6 +632,17 @@ class PersonServoNode(Node):
                 self._tilt_pid.reset()
                 self._divergence.reset()
 
+            # Inside the enter band but not yet HOLD (hold_confirm_s running): stop and let
+            # the gimbal settle. With deadzone compensation the smallest command is
+            # min_rate_dps, and with ~0.5 s of loop delay that carries the gimbal straight
+            # back out of the band -- the loop never settles (seen on spiritnx3 2026-09-23).
+            # Only with min_rate_dps set; otherwise the small command near centre is harmless.
+            if self._pan_pid.min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband_px:
+                if not self._actuation_idle:
+                    self._stop_motion("settling")
+                self._publish_state(idle=True)
+                return
+
             command = self._compute_command(err_x, err_y, dt)
             moved = self._backend.send(command)
             self._last_command = command

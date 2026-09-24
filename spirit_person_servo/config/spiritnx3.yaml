@@ -97,7 +97,7 @@
     # Tuned 2026-09-23 on spiritnx3 (bench, parked) from ServoState telemetry: the gimbal
     # ignores rate commands below ~2 deg/s and lags them ~250 ms; the loop carries ~0.5 s
     # of delay in total, which caps kp near 1.5 (~45 deg phase margin).
-    rate_kp: 1.5
+    rate_kp: 1.2           # 1.5 overshot with ~0.5 s loop delay
     rate_ki: 0.15
     max_rate_dps: 8.0      # was 3.0: only 2-3 deg/s was usable above the deadzone
     max_accel_dps2: 30.0   # reach 8 deg/s in ~0.25 s
@@ -109,8 +109,10 @@
     # 25/60 px on a 1920-wide frame is 1.0 deg / 2.5 deg: tight enough to keep the
     # person well inside frame, loose enough that detector jitter never wakes the
     # loop.
-    enter_deadband_px: 25.0
-    exit_deadband_px: 60.0
+    # 40/90 px (was 25/60): after the stop at the band edge the gimbal coasts ~25 px
+    # (min_rate_dps x ~0.5 s delay); 25 px landed it on the far edge, so it never settled.
+    enter_deadband_px: 40.0
+    exit_deadband_px: 90.0
     hold_confirm_s: 0.4
     exit_confirm_s: 0.15
 
