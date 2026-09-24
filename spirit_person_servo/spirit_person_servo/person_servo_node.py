@@ -151,6 +151,8 @@ class PersonServoNode(Node):
         self.declare_parameter("rate_kd", 0.0)
         self.declare_parameter("max_rate_dps", 3.0)
         self.declare_parameter("max_accel_dps2", 15.0)
+        # Gimbal rate deadzone compensation (see AxisPID.min_rate_dps); 0 = off.
+        self.declare_parameter("min_rate_dps", 0.0)
 
         self.declare_parameter("tilt_min_deg", -90.0)
         self.declare_parameter("tilt_max_deg", 20.0)
@@ -238,6 +240,7 @@ class PersonServoNode(Node):
             kd=float(p("rate_kd").value),
             max_rate_dps=float(p("max_rate_dps").value),
             max_accel_dps2=float(p("max_accel_dps2").value),
+            min_rate_dps=float(p("min_rate_dps").value),
         )
         self._tilt_pid = AxisPID(
             kp=float(p("rate_kp").value),
@@ -245,6 +248,7 @@ class PersonServoNode(Node):
             kd=float(p("rate_kd").value),
             max_rate_dps=float(p("max_rate_dps").value),
             max_accel_dps2=float(p("max_accel_dps2").value),
+            min_rate_dps=float(p("min_rate_dps").value),
         )
         self._hold = DeadbandHold(
             enter_deadband_px=float(p("enter_deadband_px").value),
