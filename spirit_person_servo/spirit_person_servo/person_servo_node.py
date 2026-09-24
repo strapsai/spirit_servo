@@ -678,6 +678,11 @@ class PersonServoNode(Node):
         if self._backend_name == "single_axis_rate":
             axis = str(self.get_parameter("single_axis").value).strip().lower()
             return abs(err_y) if axis == "tilt" else abs(err_x)
+        if self._backend_name == "rate" and self._pan_pid.min_rate_dps > 0.0:
+            # Same criterion as the per-axis AxisGate: centred means BOTH axes inside the
+            # band. With the 2-D magnitude, both axes could stop at ~35 px each (~50 px
+            # combined) and the servo would sit still but never count as HOLD.
+            return max(abs(err_x), abs(err_y))
         return math.hypot(err_x, err_y)
 
     def _compute_command(self, err_x: float, err_y: float, dt: float) -> ServoCommand:
