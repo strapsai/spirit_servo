@@ -126,6 +126,40 @@ class TestAxisPID:
             prev = out
 
 
+class TestMinRateDeadzone:
+    """min_rate_dps lifts a small command past the gimbal's rate deadzone."""
+
+    def pid(self, **kw):
+        base = dict(kp=1.5, ki=0.15, kd=0.0, max_rate_dps=8.0, max_accel_dps2=1e6,
+                    min_rate_dps=2.0)
+        base.update(kw)
+        return AxisPID(**base)
+
+    def test_small_error_is_raised_to_the_minimum_with_its_sign(self):
+        assert self.pid().update(0.5, 0.05) == pytest.approx(2.0)      # 0.75 -> 2.0
+        assert self.pid().update(-0.5, 0.05) == pytest.approx(-2.0)
+
+    def test_large_error_is_unchanged_and_still_capped(self):
+        assert self.pid().update(3.0, 0.05) == pytest.approx(1.5 * 3.0)   # integral term lags one step
+        assert self.pid().update(50.0, 0.05) == pytest.approx(8.0)
+
+    def test_zero_error_commands_nothing(self):
+        assert self.pid().update(0.0, 0.05) == 0.0
+
+    def test_no_integration_while_lifted(self):
+        pid = self.pid()
+        for _ in range(100):
+            pid.update(0.5, 0.05)
+        assert pid._integral == 0.0
+
+    def test_disabled_by_default(self):
+        assert AxisPID(kp=1.5, max_accel_dps2=1e6).update(0.5, 0.05) == pytest.approx(0.75, rel=0.05)
+
+    def test_slew_limit_still_applies(self):
+        pid = self.pid(max_accel_dps2=10.0)
+        assert pid.update(0.5, 0.05) == pytest.approx(0.5)             # 10 dps2 * 0.05 s
+
+
 class TestAngleStepController:
     def test_step_is_bounded(self):
         ctrl = AngleStepController(kp=1.0, max_step_deg=2.0)

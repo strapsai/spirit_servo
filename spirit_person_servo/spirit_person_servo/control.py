@@ -88,6 +88,13 @@ class AxisPID:
     max_rate_dps: float = 3.0
     max_accel_dps2: float = 30.0
     integral_limit: float = 5.0
+    # Gimbal rate deadzone compensation. The Gremsy ignores rate commands below
+    # ~2 deg/s (measured on spiritnx3 2026-09-23: 0-2 deg/s -> no motion, 2-3 deg/s ->
+    # 1:1), so a small command is a stall: the error sits there while the integral
+    # creeps up, then the gimbal jumps and overshoots. Any nonzero command is raised to
+    # at least this magnitude. The caller only runs the PID outside the deadband
+    # (DeadbandHold), so this cannot chatter around the centre. 0 disables it.
+    min_rate_dps: float = 0.0
 
     _integral: float = field(default=0.0, init=False)
     _prev_measurement: float | None = field(default=None, init=False)
@@ -113,6 +120,11 @@ class AxisPID:
 
         unsaturated = proportional + self.ki * self._integral + derivative
         saturated = clamp(unsaturated, -self.max_rate_dps, self.max_rate_dps)
+        if self.min_rate_dps > 0.0 and saturated != 0.0 and abs(saturated) < self.min_rate_dps:
+            # Raised past the deadzone; the anti-windup check below then sees a
+            # "saturated" output and stops integrating, which is what we want: the
+            # gimbal is already being driven as hard as it will actually move.
+            saturated = self.min_rate_dps if saturated > 0.0 else -self.min_rate_dps
 
         # Anti-windup: only integrate when not fighting a saturated output.
         if not freeze_integral and unsaturated == saturated:

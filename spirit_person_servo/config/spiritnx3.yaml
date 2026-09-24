@@ -94,10 +94,14 @@
     max_step_deg: 3.0
 
     # Rate backend: kp is dimensionless (1.2 ~= a 1.2 s error time constant).
-    rate_kp: 1.2
+    # Tuned 2026-09-23 on spiritnx3 (bench, parked) from ServoState telemetry: the gimbal
+    # ignores rate commands below ~2 deg/s and lags them ~250 ms; the loop carries ~0.5 s
+    # of delay in total, which caps kp near 1.5 (~45 deg phase margin).
+    rate_kp: 1.5
     rate_ki: 0.15
-    max_rate_dps: 3.0      # raise to 10 then 20 only after bench tuning
-    max_accel_dps2: 15.0
+    max_rate_dps: 8.0      # was 3.0: only 2-3 deg/s was usable above the deadzone
+    max_accel_dps2: 30.0   # reach 8 deg/s in ~0.25 s
+    min_rate_dps: 2.0      # deadzone compensation: the gimbal does not move below this
 
     tilt_min_deg: -90.0
     tilt_max_deg: 20.0
