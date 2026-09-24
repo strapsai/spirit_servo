@@ -636,12 +636,12 @@ commanded rate toward zero rather than being integrated.
 
 ```
 SERVOING:
-  |err_px| < enter_deadband_px  for hold_confirm_s
+  |err| < enter_deadband_frac  for hold_confirm_s   (err = px / frame width)
      -> publish (0.0, 0.0) once, reset integrators
      -> HOLD, and STOP PUBLISHING RATE COMMANDS ENTIRELY
 
 HOLD:  (no rate commands at all; gimbal LOCK mode holds earth-frame attitude)
-  |err_px| > exit_deadband_px for exit_confirm_s   -> SERVOING
+  |err| > exit_deadband_frac for exit_confirm_s   -> SERVOING
   enter < |err_px| <= exit AND err monotonically increasing over creep_window_s
                                                    -> CREEP: one bounded low-gain nudge, back to HOLD
   time_in_HOLD > hold_reassert_s                   -> publish (0,0) keep-alive, stay in HOLD
