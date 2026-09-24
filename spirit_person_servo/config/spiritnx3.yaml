@@ -99,7 +99,7 @@
     # of delay in total, which caps kp near 1.5 (~45 deg phase margin).
     rate_kp: 1.2           # 1.5 overshot with ~0.5 s loop delay
     rate_ki: 0.15
-    max_rate_dps: 8.0      # was 3.0: only 2-3 deg/s was usable above the deadzone
+    max_rate_dps: 5.0      # was 3.0 (only 2-3 deg/s usable above the deadzone); 8.0 overshot ~100 px after a sidestep
     max_accel_dps2: 30.0   # reach 8 deg/s in ~0.25 s
     min_rate_dps: 2.0      # deadzone compensation: the gimbal does not move below this
 
