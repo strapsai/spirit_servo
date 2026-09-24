@@ -11,6 +11,7 @@ import pytest
 
 from spirit_person_servo.control import (
     AngleStepController,
+    AxisGate,
     AxisPID,
     DeadbandHold,
     DivergenceGuard,
@@ -158,6 +159,22 @@ class TestMinRateDeadzone:
     def test_slew_limit_still_applies(self):
         pid = self.pid(max_accel_dps2=10.0)
         assert pid.update(0.5, 0.05) == pytest.approx(0.5)             # 10 dps2 * 0.05 s
+
+
+class TestAxisGate:
+    def test_stops_inside_and_resumes_only_past_resume(self):
+        g = AxisGate(stop_px=40.0, resume_px=65.0)
+        assert g.update(100.0) is True
+        assert g.update(39.0) is False          # inside the band: stop
+        assert g.update(55.0) is False          # between stop and resume: stay stopped
+        assert g.update(66.0) is True           # past resume: drive again
+        assert g.update(50.0) is True           # driving until back inside stop_px
+
+    def test_reset_drives(self):
+        g = AxisGate()
+        g.update(0.0)
+        g.reset()
+        assert g.update(50.0) is True
 
 
 class TestAngleStepController:

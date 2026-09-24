@@ -197,6 +197,34 @@ def wrap_deg_180(deg: float) -> float:
 
 
 @dataclass
+class AxisGate:
+    """Per-axis stop inside the deadband, for two-axis rate control with min_rate_dps.
+
+    DeadbandHold judges the combined error. While one axis is still outside the band,
+    the other -- already centred -- would keep being driven at least at min_rate_dps
+    and overshoot, which couples the axes (spiritnx3 2026-09-23: tilt driven in 85% of
+    the samples where its own error was already inside the band). Each axis stops once
+    its OWN error is inside ``stop_px`` and resumes only past ``resume_px``, so an axis
+    sitting at the band edge does not chatter on and off.
+    """
+
+    stop_px: float = 40.0
+    resume_px: float = 65.0
+    _driving: bool = field(default=True, init=False)
+
+    def reset(self) -> None:
+        self._driving = True
+
+    def update(self, err_px_abs: float) -> bool:
+        """Feed this axis' absolute pixel error; returns True when the axis should drive."""
+        if self._driving and err_px_abs < self.stop_px:
+            self._driving = False
+        elif not self._driving and err_px_abs > self.resume_px:
+            self._driving = True
+        return self._driving
+
+
+@dataclass
 class DeadbandHold:
     """Hysteretic settle-and-hold.
 

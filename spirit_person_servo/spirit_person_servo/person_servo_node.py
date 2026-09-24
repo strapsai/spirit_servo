@@ -37,6 +37,7 @@ from .backends import (
     make_backend,
 )
 from .control import (
+    AxisGate,
     AngleStepController,
     AxisPID,
     DeadbandHold,
@@ -250,6 +251,11 @@ class PersonServoNode(Node):
             max_accel_dps2=float(p("max_accel_dps2").value),
             min_rate_dps=float(p("min_rate_dps").value),
         )
+        # Per-axis stop for two-axis rate control (see AxisGate); only with min_rate_dps.
+        _enter = float(p("enter_deadband_px").value)
+        _exit = float(p("exit_deadband_px").value)
+        self._pan_gate = AxisGate(stop_px=_enter, resume_px=(_enter + _exit) / 2.0)
+        self._tilt_gate = AxisGate(stop_px=_enter, resume_px=(_enter + _exit) / 2.0)
         self._hold = DeadbandHold(
             enter_deadband_px=float(p("enter_deadband_px").value),
             exit_deadband_px=float(p("exit_deadband_px").value),
@@ -630,6 +636,8 @@ class PersonServoNode(Node):
                 self._transition(State.SERVOING, "target drifted")
                 self._pan_pid.reset()
                 self._tilt_pid.reset()
+                self._pan_gate.reset()
+                self._tilt_gate.reset()
                 self._divergence.reset()
 
             # Inside the enter band but not yet HOLD (hold_confirm_s running): stop and let
@@ -680,8 +688,20 @@ class PersonServoNode(Node):
         # Wrong intrinsics make an aggressive loop oscillate; derate instead.
         derate = 1.0 if self._zoom_valid() else 0.5
 
-        pan_rate = self._pan_pid.update(err_yaw * derate, dt) * self._pan_sign
-        tilt_rate = self._tilt_pid.update(err_pitch * derate, dt) * self._tilt_sign
+        # Two-axis rate with deadzone compensation: an axis whose own error is already
+        # inside the band stops (and forgets its integral) while the other finishes,
+        # instead of being pushed past centre at min_rate_dps (AxisGate).
+        gated = self._pan_pid.min_rate_dps > 0.0 and self._backend_name == "rate"
+        if gated and not self._pan_gate.update(abs(err_x)):
+            self._pan_pid.reset()
+            pan_rate = 0.0
+        else:
+            pan_rate = self._pan_pid.update(err_yaw * derate, dt) * self._pan_sign
+        if gated and not self._tilt_gate.update(abs(err_y)):
+            self._tilt_pid.reset()
+            tilt_rate = 0.0
+        else:
+            tilt_rate = self._tilt_pid.update(err_pitch * derate, dt) * self._tilt_sign
 
         angles_valid = self._gimbal_available and (
             time.monotonic() - self._last_gimbal_s
