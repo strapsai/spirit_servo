@@ -160,8 +160,14 @@ class PersonServoNode(Node):
         self.declare_parameter("tilt_min_deg", -90.0)
         self.declare_parameter("tilt_max_deg", 20.0)
 
-        self.declare_parameter("enter_deadband_px", 25.0)
-        self.declare_parameter("exit_deadband_px", 60.0)
+        # Fractions of the decoded frame width, on each axis, so the same values hold for
+        # EO 1920x1080 and IR 640x512 (0.021 ~ 40 px and 0.047 ~ 90 px at 1920).
+        self.declare_parameter("enter_deadband_frac", 0.021)
+        self.declare_parameter("exit_deadband_frac", 0.047)
+        # Removed: pixel bands meant re-tuning per stream resolution. Declared only to
+        # warn when an old config still sets them.
+        self.declare_parameter("enter_deadband_px", 0.0)
+        self.declare_parameter("exit_deadband_px", 0.0)
         self.declare_parameter("hold_confirm_s", 0.4)
         self.declare_parameter("exit_confirm_s", 0.15)
 
@@ -254,15 +260,19 @@ class PersonServoNode(Node):
             min_rate_dps=float(p("min_rate_dps").value),
         )
         # Per-axis stop for two-axis rate control (see AxisGate); only with min_rate_dps.
-        _enter = float(p("enter_deadband_px").value)
-        _exit = float(p("exit_deadband_px").value)
-        self._pan_gate = AxisGate(stop_px=_enter, resume_px=(_enter + _exit) / 2.0)
-        self._tilt_gate = AxisGate(stop_px=_enter, resume_px=(_enter + _exit) / 2.0)
+        for old in ("enter_deadband_px", "exit_deadband_px"):
+            if float(p(old).value) > 0.0:
+                self.get_logger().warn(
+                    f"{old} is ignored: set {old[:-3]}_frac (fraction of the frame width)"
+                )
+        self._pan_gate = AxisGate()
+        self._tilt_gate = AxisGate()
         self._hold = DeadbandHold(
-            enter_deadband_px=float(p("enter_deadband_px").value),
-            exit_deadband_px=float(p("exit_deadband_px").value),
             hold_confirm_s=float(p("hold_confirm_s").value),
             exit_confirm_s=float(p("exit_confirm_s").value),
+        )
+        self._set_deadbands(
+            float(p("enter_deadband_frac").value), float(p("exit_deadband_frac").value)
         )
         self._divergence = DivergenceGuard()
 
@@ -463,10 +473,10 @@ class PersonServoNode(Node):
                     self._pan_pid.max_rate_dps = self._tilt_pid.max_rate_dps = float(value)
                 elif prm.name == "max_accel_dps2":
                     self._pan_pid.max_accel_dps2 = self._tilt_pid.max_accel_dps2 = float(value)
-                elif prm.name == "enter_deadband_px":
-                    self._hold.enter_deadband_px = float(value)
-                elif prm.name == "exit_deadband_px":
-                    self._hold.exit_deadband_px = float(value)
+                elif prm.name == "enter_deadband_frac":
+                    self._set_deadbands(float(value), self._hold.exit_deadband)
+                elif prm.name == "exit_deadband_frac":
+                    self._set_deadbands(self._hold.enter_deadband, float(value))
                 else:
                     continue
                 self.get_logger().info(f"param {prm.name} -> {value}")
@@ -624,7 +634,7 @@ class PersonServoNode(Node):
                 state = self._state
 
             err_x, err_y = self._err_px
-            err_mag = self._driven_error_px(err_x, err_y)
+            err_mag = self._driven_error(*self._normalized(err_x, err_y))
             should_drive = self._hold.update(err_mag, now)
 
             if not should_drive:
@@ -647,7 +657,7 @@ class PersonServoNode(Node):
             # min_rate_dps, and with ~0.5 s of loop delay that carries the gimbal straight
             # back out of the band -- the loop never settles (seen on spiritnx3 2026-09-23).
             # Only with min_rate_dps set; otherwise the small command near centre is harmless.
-            if self._pan_pid.min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband_px:
+            if self._pan_pid.min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband:
                 if not self._actuation_idle:
                     self._stop_motion("settling")
                 self._publish_state(idle=True)
@@ -669,8 +679,25 @@ class PersonServoNode(Node):
 
             self._publish_state(idle=self._actuation_idle)
 
-    def _driven_error_px(self, err_x: float, err_y: float) -> float:
-        """Pixel error the hold band, the settle stop and the divergence guard judge.
+    def _set_deadbands(self, enter: float, exit_: float) -> None:
+        """Hold band and per-axis gates, as fractions of the frame width."""
+        self._hold.enter_deadband = enter
+        self._hold.exit_deadband = exit_
+        for gate in (self._pan_gate, self._tilt_gate):
+            gate.stop = enter
+            gate.resume = (enter + exit_) / 2.0
+
+    def _normalized(self, err_x: float, err_y: float) -> tuple[float, float]:
+        """Pixel error as a fraction of the frame width, on both axes.
+
+        One divisor for both axes keeps the band square in pixels, as it was when the
+        thresholds were in pixels, and makes every threshold resolution-free.
+        """
+        width = max(float(self._frame_size[0]), 1.0)
+        return err_x / width, err_y / width
+
+    def _driven_error(self, err_x: float, err_y: float) -> float:
+        """Normalized error the hold band, the settle stop and the divergence guard judge.
 
         Only the axis the backend actually drives: single_axis_rate on pan cannot remove a
         vertical offset, so with the 2-D magnitude a person centred in pan but above or
@@ -699,12 +726,13 @@ class PersonServoNode(Node):
         # inside the band stops (and forgets its integral) while the other finishes,
         # instead of being pushed past centre at min_rate_dps (AxisGate).
         gated = self._pan_pid.min_rate_dps > 0.0 and self._backend_name == "rate"
-        if gated and not self._pan_gate.update(abs(err_x)):
+        norm_x, norm_y = self._normalized(err_x, err_y)
+        if gated and not self._pan_gate.update(abs(norm_x)):
             self._pan_pid.reset()
             pan_rate = 0.0
         else:
             pan_rate = self._pan_pid.update(err_yaw * derate, dt) * self._pan_sign
-        if gated and not self._tilt_gate.update(abs(err_y)):
+        if gated and not self._tilt_gate.update(abs(norm_y)):
             self._tilt_pid.reset()
             tilt_rate = 0.0
         else:
@@ -876,7 +904,7 @@ class PersonServoNode(Node):
                 cv2.circle(canvas, (tx, ty), 7, (0, 255, 255), -1)
 
         # image centre + the deadband the loop is trying to settle inside
-        band = int(self._hold.enter_deadband_px)
+        band = int(self._hold.enter_deadband * canvas.shape[1])
         cv2.rectangle(canvas, (cx - band, cy - band), (cx + band, cy + band),
                       (255, 200, 0), 2)
         cv2.drawMarker(canvas, (cx, cy), (255, 200, 0), cv2.MARKER_CROSS, 26, 2)

@@ -113,8 +113,8 @@
     # loop.
     # 40/90 px (was 25/60): after the stop at the band edge the gimbal coasts ~25 px
     # (min_rate_dps x ~0.5 s delay); 25 px landed it on the far edge, so it never settled.
-    enter_deadband_px: 40.0
-    exit_deadband_px: 90.0
+    enter_deadband_frac: 0.021   # of the frame width (~40 px at 1920); same value for IR
+    exit_deadband_frac: 0.047    # ~90 px at 1920
     hold_confirm_s: 0.4
     exit_confirm_s: 0.15
 
