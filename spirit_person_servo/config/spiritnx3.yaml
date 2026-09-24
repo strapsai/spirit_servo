@@ -54,7 +54,9 @@
     #       Verify with a BOUNDED RATE PROBE, never an angle probe -- that one
     #       choice is the difference between a 2 deg mistake and the 202 deg
     #       slew. Only then set angle_frame_verified: true.
-    servo_backend: "single_axis_rate"
+    # Two-axis rate (pan + tilt) since 2026-09-23: cmd/gimbal_rate probed on spiritnx3,
+    # both axes ~1:1 above a ~2 deg/s deadzone (min_rate_dps covers both).
+    servo_backend: "rate"
     single_axis: "pan"
     detector_backend: "yolo"
     image_source: "rtsp"

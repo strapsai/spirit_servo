@@ -687,6 +687,15 @@ class PersonServoNode(Node):
             time.monotonic() - self._last_gimbal_s
         ) < self._gimbal_timeout_s
         angle_pan, angle_tilt = self._gimbal_pan_deg, self._gimbal_tilt_deg
+        # Tilt limits for the RATE paths (the angle controller clamps its own
+        # setpoints): at a limit, never keep driving further past it. A positive tilt
+        # rate raises tilt_deg (measured on spiritnx3 2026-09-23). No telemetry -> no
+        # limit knowledge -> the gimbal's own stops are the only guard, so keep rates
+        # already bounded by max_rate_dps.
+        if angles_valid:
+            if (self._gimbal_tilt_deg >= self._angle_ctrl.tilt_max_deg and tilt_rate > 0.0) or \
+                    (self._gimbal_tilt_deg <= self._angle_ctrl.tilt_min_deg and tilt_rate < 0.0):
+                tilt_rate = 0.0
         if angles_valid:
             angle_pan, angle_tilt = self._angle_ctrl.step(
                 self._gimbal_pan_deg,
