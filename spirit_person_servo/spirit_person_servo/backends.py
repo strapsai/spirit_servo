@@ -278,9 +278,10 @@ class TrackTouchBackend(_BackendBase):
 class RateBackend(_BackendBase):
     """Angular-rate control.
 
-    Requires a `cmd/gimbal_rate` (Vector3 pitch/roll/yaw deg/s -> INPUT_SPEED)
-    topic that does not exist in gremsy_ros2 yet. It deliberately does NOT fall
-    back to cmd/gimbal_tilt + cmd/gimbal_pan, because those cancel each other.
+    Requires `cmd/gimbal_rate` (Vector3 pitch/roll/yaw deg/s -> INPUT_SPEED), which
+    gremsy_ros2 on spiritnx3 has (probed 2026-09-23: both axes at once, ~1:1 above a
+    ~2 deg/s deadzone on each axis). It deliberately does NOT fall back to
+    cmd/gimbal_tilt + cmd/gimbal_pan, because those cancel each other.
 
     This is the only backend where a crash leaves motion latched, so it is the
     reason gimbal_deadman_node exists.

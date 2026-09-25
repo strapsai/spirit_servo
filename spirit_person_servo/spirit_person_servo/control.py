@@ -88,6 +88,13 @@ class AxisPID:
     max_rate_dps: float = 3.0
     max_accel_dps2: float = 30.0
     integral_limit: float = 5.0
+    # Gimbal rate deadzone compensation. The Gremsy ignores rate commands below
+    # ~2 deg/s (measured on spiritnx3 2026-09-23: 0-2 deg/s -> no motion, 2-3 deg/s ->
+    # 1:1), so a small command is a stall: the error sits there while the integral
+    # creeps up, then the gimbal jumps and overshoots. Any nonzero command is raised to
+    # at least this magnitude. The caller only runs the PID outside the deadband
+    # (DeadbandHold), so this cannot chatter around the centre. 0 disables it.
+    min_rate_dps: float = 0.0
 
     _integral: float = field(default=0.0, init=False)
     _prev_measurement: float | None = field(default=None, init=False)
@@ -113,6 +120,11 @@ class AxisPID:
 
         unsaturated = proportional + self.ki * self._integral + derivative
         saturated = clamp(unsaturated, -self.max_rate_dps, self.max_rate_dps)
+        if self.min_rate_dps > 0.0 and saturated != 0.0 and abs(saturated) < self.min_rate_dps:
+            # Raised past the deadzone; the anti-windup check below then sees a
+            # "saturated" output and stops integrating, which is what we want: the
+            # gimbal is already being driven as hard as it will actually move.
+            saturated = self.min_rate_dps if saturated > 0.0 else -self.min_rate_dps
 
         # Anti-windup: only integrate when not fighting a saturated output.
         if not freeze_integral and unsaturated == saturated:
@@ -185,15 +197,45 @@ def wrap_deg_180(deg: float) -> float:
 
 
 @dataclass
+class AxisGate:
+    """Per-axis stop inside the deadband, for two-axis rate control with min_rate_dps.
+
+    DeadbandHold judges the combined error. While one axis is still outside the band,
+    the other -- already centred -- would keep being driven at least at min_rate_dps
+    and overshoot, which couples the axes (spiritnx3 2026-09-23: tilt driven in 85% of
+    the samples where its own error was already inside the band). Each axis stops once
+    its OWN error is inside ``stop`` and resumes only past ``resume``, so an axis
+    sitting at the band edge does not chatter on and off. Unitless: the node feeds
+    the error as a fraction of the frame width.
+    """
+
+    stop: float = 0.021
+    resume: float = 0.034
+    _driving: bool = field(default=True, init=False)
+
+    def reset(self) -> None:
+        self._driving = True
+
+    def update(self, err_abs: float) -> bool:
+        """Feed this axis' absolute error; returns True when the axis should drive."""
+        if self._driving and err_abs < self.stop:
+            self._driving = False
+        elif not self._driving and err_abs > self.resume:
+            self._driving = True
+        return self._driving
+
+
+@dataclass
 class DeadbandHold:
     """Hysteretic settle-and-hold.
 
     Separate enter/exit thresholds so detector jitter around the deadband edge
-    cannot chatter the loop between driving and holding.
+    cannot chatter the loop between driving and holding. Unitless: the node feeds
+    the error as a fraction of the frame width.
     """
 
-    enter_deadband_px: float = 25.0
-    exit_deadband_px: float = 60.0
+    enter_deadband: float = 0.021
+    exit_deadband: float = 0.047
     hold_confirm_s: float = 0.4
     exit_confirm_s: float = 0.15
 
@@ -210,10 +252,10 @@ class DeadbandHold:
         self._inside_since = None
         self._outside_since = None
 
-    def update(self, err_px: float, now: float) -> bool:
-        """Feed the current pixel error magnitude; returns True when the loop should drive."""
+    def update(self, err: float, now: float) -> bool:
+        """Feed the current error magnitude; returns True when the loop should drive."""
         if self._holding:
-            if err_px > self.exit_deadband_px:
+            if err > self.exit_deadband:
                 if self._outside_since is None:
                     self._outside_since = now
                 elif now - self._outside_since >= self.exit_confirm_s:
@@ -223,7 +265,7 @@ class DeadbandHold:
             else:
                 self._outside_since = None
         else:
-            if err_px < self.enter_deadband_px:
+            if err < self.enter_deadband:
                 if self._inside_since is None:
                     self._inside_since = now
                 elif now - self._inside_since >= self.hold_confirm_s:
@@ -242,10 +284,11 @@ class DivergenceGuard:
 
     This is the cheap insurance against an inverted sign convention: a runaway
     slew shows up as monotonically increasing error under non-zero command.
+    Unitless, like DeadbandHold (0.001 of the width is ~2 px at 1920).
     """
 
     max_consecutive: int = 8
-    min_growth_px: float = 2.0
+    min_growth: float = 0.001
 
     _count: int = field(default=0, init=False)
     _prev_err: float | None = field(default=None, init=False)
@@ -258,15 +301,15 @@ class DivergenceGuard:
         self._count = 0
         self._prev_err = None
 
-    def update(self, err_px: float, commanding: bool) -> bool:
+    def update(self, err: float, commanding: bool) -> bool:
         """Returns True if the guard has tripped."""
         if not commanding:
             self.reset()
             return False
 
-        if self._prev_err is not None and err_px > self._prev_err + self.min_growth_px:
+        if self._prev_err is not None and err > self._prev_err + self.min_growth:
             self._count += 1
         else:
             self._count = 0
-        self._prev_err = err_px
+        self._prev_err = err
         return self._count >= self.max_consecutive

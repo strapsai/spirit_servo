@@ -11,6 +11,7 @@ import pytest
 
 from spirit_person_servo.control import (
     AngleStepController,
+    AxisGate,
     AxisPID,
     DeadbandHold,
     DivergenceGuard,
@@ -126,6 +127,56 @@ class TestAxisPID:
             prev = out
 
 
+class TestMinRateDeadzone:
+    """min_rate_dps lifts a small command past the gimbal's rate deadzone."""
+
+    def pid(self, **kw):
+        base = dict(kp=1.5, ki=0.15, kd=0.0, max_rate_dps=8.0, max_accel_dps2=1e6,
+                    min_rate_dps=2.0)
+        base.update(kw)
+        return AxisPID(**base)
+
+    def test_small_error_is_raised_to_the_minimum_with_its_sign(self):
+        assert self.pid().update(0.5, 0.05) == pytest.approx(2.0)      # 0.75 -> 2.0
+        assert self.pid().update(-0.5, 0.05) == pytest.approx(-2.0)
+
+    def test_large_error_is_unchanged_and_still_capped(self):
+        assert self.pid().update(3.0, 0.05) == pytest.approx(1.5 * 3.0)   # integral term lags one step
+        assert self.pid().update(50.0, 0.05) == pytest.approx(8.0)
+
+    def test_zero_error_commands_nothing(self):
+        assert self.pid().update(0.0, 0.05) == 0.0
+
+    def test_no_integration_while_lifted(self):
+        pid = self.pid()
+        for _ in range(100):
+            pid.update(0.5, 0.05)
+        assert pid._integral == 0.0
+
+    def test_disabled_by_default(self):
+        assert AxisPID(kp=1.5, max_accel_dps2=1e6).update(0.5, 0.05) == pytest.approx(0.75, rel=0.05)
+
+    def test_slew_limit_still_applies(self):
+        pid = self.pid(max_accel_dps2=10.0)
+        assert pid.update(0.5, 0.05) == pytest.approx(0.5)             # 10 dps2 * 0.05 s
+
+
+class TestAxisGate:
+    def test_stops_inside_and_resumes_only_past_resume(self):
+        g = AxisGate(stop=40.0, resume=65.0)
+        assert g.update(100.0) is True
+        assert g.update(39.0) is False          # inside the band: stop
+        assert g.update(55.0) is False          # between stop and resume: stay stopped
+        assert g.update(66.0) is True           # past resume: drive again
+        assert g.update(50.0) is True           # driving until back inside stop
+
+    def test_reset_drives(self):
+        g = AxisGate()
+        g.update(0.0)
+        g.reset()
+        assert g.update(50.0) is True
+
+
 class TestAngleStepController:
     def test_step_is_bounded(self):
         ctrl = AngleStepController(kp=1.0, max_step_deg=2.0)
@@ -182,14 +233,14 @@ class TestDeadbandHold:
         assert hold.holding is False
 
     def test_holds_only_after_confirmation_window(self):
-        hold = DeadbandHold(enter_deadband_px=25.0, hold_confirm_s=0.4)
+        hold = DeadbandHold(enter_deadband=25.0, hold_confirm_s=0.4)
         assert hold.update(10.0, now=0.0) is True   # inside, but not yet confirmed
         assert hold.update(10.0, now=0.3) is True
         assert hold.update(10.0, now=0.45) is False  # confirmed -> holding
         assert hold.holding is True
 
     def test_hysteresis_ignores_jitter_between_thresholds(self):
-        hold = DeadbandHold(enter_deadband_px=25.0, exit_deadband_px=60.0, hold_confirm_s=0.0)
+        hold = DeadbandHold(enter_deadband=25.0, exit_deadband=60.0, hold_confirm_s=0.0)
         hold.update(10.0, now=0.0)
         assert hold.update(10.0, now=0.1) is False
         # 40 px is above enter but below exit: must not wake the loop.
@@ -197,7 +248,7 @@ class TestDeadbandHold:
             assert hold.update(40.0, now=0.2 + i * 0.1) is False
 
     def test_exits_hold_after_confirmed_large_error(self):
-        hold = DeadbandHold(enter_deadband_px=25.0, exit_deadband_px=60.0,
+        hold = DeadbandHold(enter_deadband=25.0, exit_deadband=60.0,
                             hold_confirm_s=0.0, exit_confirm_s=0.15)
         hold.update(10.0, now=0.0)
         hold.update(10.0, now=0.1)
@@ -207,7 +258,7 @@ class TestDeadbandHold:
         assert hold.holding is False
 
     def test_transient_spike_does_not_break_hold(self):
-        hold = DeadbandHold(enter_deadband_px=25.0, exit_deadband_px=60.0,
+        hold = DeadbandHold(enter_deadband=25.0, exit_deadband=60.0,
                             hold_confirm_s=0.0, exit_confirm_s=0.15)
         hold.update(10.0, now=0.0)
         hold.update(10.0, now=0.1)
@@ -217,8 +268,8 @@ class TestDeadbandHold:
 
     def test_reset_restores_driving(self):
         hold = DeadbandHold(hold_confirm_s=0.0)
-        hold.update(1.0, now=0.0)
-        hold.update(1.0, now=0.1)
+        hold.update(0.001, now=0.0)
+        hold.update(0.001, now=0.1)
         assert hold.holding is True
         hold.reset()
         assert hold.holding is False
@@ -228,7 +279,7 @@ class TestDivergenceGuard:
     def test_trips_when_error_grows_under_command(self):
         # The first sample only establishes the baseline, so tripping on 8
         # consecutive growths takes 9 updates.
-        guard = DivergenceGuard(max_consecutive=8, min_growth_px=2.0)
+        guard = DivergenceGuard(max_consecutive=8, min_growth=2.0)
         err = 100.0
         guard.update(err, commanding=True)
         for _ in range(7):
@@ -252,7 +303,7 @@ class TestDivergenceGuard:
             assert guard.update(err, commanding=False) is False
 
     def test_noise_resets_the_streak(self):
-        guard = DivergenceGuard(max_consecutive=4, min_growth_px=2.0)
+        guard = DivergenceGuard(max_consecutive=4, min_growth=2.0)
         err = 100.0
         for _ in range(3):
             err += 10.0
