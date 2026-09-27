@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>spirit_person_servo_viz</name>
+  <version>0.1.0</version>
+  <description>Foxglove overlay of the person servo's target on the Spirit EO video (ground side).</description>
+  <maintainer email="joonk2@andrew.cmu.edu">HJoonKwon</maintainer>
+  <license>MIT</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>spirit_person_servo_msgs</exec_depend>
+  <exec_depend>foxglove_msgs</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

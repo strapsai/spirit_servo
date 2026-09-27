@@ -59,8 +59,11 @@
     detector_backend: "yolo"
     image_source: "rtsp"
 
-    rtsp_url: "rtsp://192.168.70.23:8554/payload"
-    rtsp_latency_ms: 100
+    # The Jetson's sender_rtsp re-host (dtc-streams, shared media), NOT the gimbal: the
+    # Gremsy serves ONE RTSP session per mount, and a second client there gets 503 and
+    # knocks the EO downlink out. Needs dtc-streams on sender_rtsp (the RTSP default).
+    rtsp_url: "rtsp://127.0.0.1:8554/eo"
+    rtsp_latency_ms: 20           # loopback: no network jitter to absorb
     rtsp_hardware_decode: false   # nvvidconv needs EGL; headless drone has none
     replay_video: ""
     replay_fps: 10.0
