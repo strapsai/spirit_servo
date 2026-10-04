@@ -34,7 +34,8 @@ class ImageSource(Protocol):
 
 
 def build_rtsp_pipeline(
-    rtsp_url: str, latency_ms: int = 100, use_hardware_decode: bool = False
+    rtsp_url: str, latency_ms: int = 100, use_hardware_decode: bool = False,
+    protocols: str = "tcp"
 ) -> str:
     """GStreamer pipeline string for cv2.VideoCapture(..., cv2.CAP_GSTREAMER).
 
@@ -52,6 +53,12 @@ def build_rtsp_pipeline(
       "nvbufsurftransform: Could not get EGL display connection", then the
       pipeline fails to open. ``avdec_h264`` decodes 1080p fine for a 10 Hz loop.
       Only enable hardware decode once the EGL path is actually verified.
+
+      ``protocols`` defaults to TCP because the payload serves no RTP over
+      UDP: measured 2026-09-17, a UDP client completes DESCRIBE/SETUP/PLAY
+      and then receives nothing, so rtspsrc sits in rtpjitterbuffer at 100%%
+      of a core forever instead of falling back. The same URL over TCP
+      negotiates H264 and plays.
     """
     decoder = (
         "nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert"
@@ -59,7 +66,7 @@ def build_rtsp_pipeline(
         else "avdec_h264 ! videoconvert"
     )
     return (
-        f"rtspsrc location={rtsp_url} latency={latency_ms} ! "
+        f"rtspsrc location={rtsp_url} latency={latency_ms} protocols={protocols} ! "
         f"rtph264depay ! h264parse ! {decoder} ! "
         "video/x-raw,format=BGR ! "
         "appsink sync=false max-buffers=1 drop=true"
