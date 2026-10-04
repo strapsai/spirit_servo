@@ -122,7 +122,7 @@ class PersonServoNode(Node):
         )
 
         self.declare_parameter("servo_backend", "dry_run")
-        self.declare_parameter("detector_backend", "yolo")
+        self.declare_parameter("detector_backend", "rfdetr_trt")
         self.declare_parameter("image_source", "rtsp")
 
         self.declare_parameter("rtsp_url", "rtsp://127.0.0.1:8554/eo")  # sender re-host, never the gimbal
@@ -137,7 +137,10 @@ class PersonServoNode(Node):
         self.declare_parameter("yolo_device", "cuda:0")
         self.declare_parameter("yolo_half", True)
         # TensorRT engine built on the target from rfdetr's ONNX export (see README).
-        self.declare_parameter("rfdetr_engine", "")
+        self.declare_parameter(
+            "rfdetr_engine",
+            f"{airlab}/weights/person_servo/engines/sm87-trt10.4/rfdetr_m_448x800.fp16.engine",
+        )
         self.declare_parameter("rfdetr_confidence", 0.5)
 
         self.declare_parameter("detect_rate_hz", 10.0)
@@ -395,6 +398,11 @@ class PersonServoNode(Node):
     def _build_detector(self):
         p = self.get_parameter
         backend = p("detector_backend").value
+        if backend == "rfdetr_trt" and not os.path.isfile(p("rfdetr_engine").value):
+            self.get_logger().error(
+                f"rfdetr_engine {p('rfdetr_engine').value} not found; falling back to yolo"
+            )
+            backend = "yolo"
         if backend == "yolo":
             return make_detector(
                 "yolo",
