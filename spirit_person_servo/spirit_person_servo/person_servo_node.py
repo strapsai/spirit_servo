@@ -136,6 +136,9 @@ class PersonServoNode(Node):
         self.declare_parameter("yolo_confidence", 0.35)
         self.declare_parameter("yolo_device", "cuda:0")
         self.declare_parameter("yolo_half", True)
+        # TensorRT engine built on the target from rfdetr's ONNX export (see README).
+        self.declare_parameter("rfdetr_engine", "")
+        self.declare_parameter("rfdetr_confidence", 0.5)
 
         self.declare_parameter("detect_rate_hz", 10.0)
         self.declare_parameter("control_rate_hz", 20.0)
@@ -400,6 +403,12 @@ class PersonServoNode(Node):
                 imgsz=int(p("yolo_imgsz").value),
                 device=p("yolo_device").value,
                 half=bool(p("yolo_half").value),
+            )
+        if backend == "rfdetr_trt":
+            return make_detector(
+                "rfdetr_trt",
+                engine=p("rfdetr_engine").value,
+                confidence=float(p("rfdetr_confidence").value),
             )
         return make_detector(backend)
 
