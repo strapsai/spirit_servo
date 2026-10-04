@@ -125,7 +125,7 @@ class PersonServoNode(Node):
         self.declare_parameter("detector_backend", "yolo")
         self.declare_parameter("image_source", "rtsp")
 
-        self.declare_parameter("rtsp_url", "rtsp://192.168.70.23:8554/payload")
+        self.declare_parameter("rtsp_url", "rtsp://127.0.0.1:8554/eo")  # sender re-host, never the gimbal
         self.declare_parameter("rtsp_latency_ms", 100)
         self.declare_parameter("rtsp_hardware_decode", False)
         self.declare_parameter("replay_video", "")

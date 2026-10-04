@@ -43,7 +43,7 @@ class SignCalibrator(Node):
 
         robot = os.environ.get("ROBOT_NAME", "spiritnx3")
         self.declare_parameter("gimbal_namespace", f"/{robot}/gremsy")
-        self.declare_parameter("rtsp_url", "rtsp://192.168.70.23:8554/payload")
+        self.declare_parameter("rtsp_url", "rtsp://127.0.0.1:8554/eo")  # sender re-host, never the gimbal
         self.declare_parameter("weights", "/opt/person_servo/weights/yolo11n.pt")
         self.declare_parameter("probe_dps", 3.0)
         self.declare_parameter("probe_s", 1.0)
