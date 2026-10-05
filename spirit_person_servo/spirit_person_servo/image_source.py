@@ -108,13 +108,13 @@ class RtspImageSource:
         reconnect_delay_s: float = 2.0,
         half_resolution: bool = False,
     ) -> None:
-        # Half resolution reads raw I420 and converts on latest(), so the reader thread
-        # never converts the 2 in 3 frames the 10 Hz detector skips (spiritnx3,
-        # 2026-10-04: ~105% -> ~57% of a core for 1080p30, and the streaming thread no
-        # longer saturates and falls behind the live stream).
+        # Reads raw I420 and converts on latest(), so the reader thread never converts
+        # the 2 in 3 frames the 10 Hz detector skips (spiritnx3, 2026-10-04, half-res
+        # 1080p30: ~105% -> ~57% of a core, and the streaming thread no longer
+        # saturates and falls behind the live stream). Half resolution only sets the size.
         self._half = half_resolution
         self._pipeline = build_rtsp_pipeline(
-            rtsp_url, latency_ms, use_hardware_decode, raw_i420=half_resolution
+            rtsp_url, latency_ms, use_hardware_decode, raw_i420=True
         )
         self._rtsp_url = rtsp_url
         self._reconnect_delay_s = reconnect_delay_s
@@ -175,7 +175,11 @@ class RtspImageSource:
             if self._frame is None:
                 return None
             frame, stamp = self._frame, self._stamp
-        return (i420_to_half_bgr(frame) if self._half else frame), stamp
+        if self._half:
+            return i420_to_half_bgr(frame), stamp
+        import cv2
+
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420), stamp
 
     def stop(self) -> None:
         self._running.clear()

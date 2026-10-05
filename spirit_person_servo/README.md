@@ -139,18 +139,46 @@ deadband rectangle.
 
 The default detector is RF-DETR Medium as a TensorRT FP16 engine (`detector_backend:
 rfdetr_trt`). Engines only load on the GPU and TensorRT version they were built with,
-so build one on each aircraft, inside the servo image. The ONNX comes from
-`rfdetr==1.11.1`: `RFDETRMedium().export(shape=(448, 800))` (needs `onnx<1.19`).
+so build them on each aircraft, inside the servo image. One engine per camera, each
+at that camera's frame shape, so neither is stretched: EO `448x800` (16:9, fed the
+960x540 half-res frame) and IR `512x640` (the native 640x512 frame, no resize). The
+ONNX comes from `rfdetr==1.11.1`: `RFDETRMedium().export(shape=(H, W))` (needs
+`onnx<1.19`).
 
 ```bash
 E=$AIRLAB_PATH/weights/person_servo/engines/sm87-trt10.4
+for S in 448x800 512x640; do
 docker run --rm --runtime nvidia -v $AIRLAB_PATH:$AIRLAB_PATH \
   --entrypoint /usr/src/tensorrt/bin/trtexec dtc/dtc:jp6.1-06e-person-servo \
-  --onnx=$AIRLAB_PATH/weights/person_servo/onnx/rfdetr_m_448x800.onnx \
-  --saveEngine=$E/rfdetr_m_448x800.fp16.engine --fp16 --memPoolSize=workspace:4096
+  --onnx=$AIRLAB_PATH/weights/person_servo/onnx/rfdetr_m_$S.onnx \
+  --saveEngine=$E/rfdetr_m_$S.fp16.engine --fp16 --memPoolSize=workspace:4096
+done
 ```
 
 Without the engine the node logs an error and runs YOLO11n instead.
+
+### EO or IR
+
+`modality: eo | ir` picks the camera. On an aircraft it is the Spirit stream the
+session profile's `reid/streams.yaml` sends (EO when both are), and the servo reads
+that stream's dtc-streams re-host (`launch/spirit/launch_person_servo.sh`). With no
+EO or IR stream sent over RTSP, the servo does not start. Both cameras use the
+same RF-DETR model, signs and gains; each runs its own engine, shaped to its frame.
+What changes per modality:
+
+| | eo | ir |
+|---|---|---|
+| intrinsics | `<drone>_eo.yaml`, scaled by live `zoom_level` | `<drone>_ir.yaml`, fixed (the reported zoom is the EO's) |
+| default `rtsp_url` | `127.0.0.1:8554/eo` | `127.0.0.1:8555/ir` |
+| default `rtsp_half_resolution` | true (1080p) | false (640x512) |
+| default `rfdetr_engine` | `rfdetr_m_448x800.fp16.engine` | `rfdetr_m_512x640.fp16.engine` (native, no resize) |
+
+`rate_zoom_factor_table` applies to both cameras: the gimbal slows its rate response
+on EO zoom whichever camera is being watched.
+
+```bash
+ros2 launch spirit_person_servo person_servo.launch.py modality:=ir
+```
 
 ---
 
@@ -213,8 +241,11 @@ PYTHONPATH=. python3 -m pytest test/ -q
 - `cmd/gimbal_rate` now exists in `gremsy_ros2`, so the `rate` backend is no
   longer inert — but it has never been run against hardware, and the driver has
   to be rebuilt on the aircraft before anything is subscribed.
-- Asserting 1× zoom on arm is not implemented. Live `zoom_level` scales the
+- Asserting 1× zoom on arm is not implemented. Live `zoom_level` scales the EO
   intrinsics, and the loop derates its gain by half when that reading is stale.
+- IR pixel errors use the pinhole model; the IR lens distortion (`distortion` in
+  `<drone>_ir.yaml`, ~16 px at the corners) is not applied. It is ~0 near the
+  centre, where the servo settles.
 - The BoT-SORT adapter reads a semi-private ultralytics interface
   (`.conf`/`.xywh`/`.cls`). Safe under the current tight pin
   (`>=8.3.78,<=8.3.80`); re-verify if that pin moves.

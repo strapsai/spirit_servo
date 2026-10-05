@@ -55,6 +55,16 @@ from .image_source import ReplayImageSource, RtspImageSource
 from .target_selector import TargetSelector
 from .tracker import BotSortTracker
 
+# Per-camera defaults. rtsp_url is the dtc-streams sender_rtsp re-host, never the gimbal.
+# IR is 640x512, so half resolution would leave the detector 320 px, and its engine
+# takes the native frame, so IR is never resized or stretched.
+_MODALITY_DEFAULTS = {
+    "eo": {"rtsp_url": "rtsp://127.0.0.1:8554/eo", "rtsp_half_resolution": True,
+           "rfdetr_engine": "rfdetr_m_448x800.fp16.engine"},
+    "ir": {"rtsp_url": "rtsp://127.0.0.1:8555/ir", "rtsp_half_resolution": False,
+           "rfdetr_engine": "rfdetr_m_512x640.fp16.engine"},
+}
+
 _BACKEND_ENUM = {
     "dry_run": ServoState.BACKEND_DRY_RUN,
     "track_touch": ServoState.BACKEND_TRACK_TOUCH,
@@ -74,7 +84,7 @@ class State(IntEnum):
 
 
 def load_intrinsics(path: str, zoom: float = 1.0) -> Intrinsics:
-    """Read fx/fy/cx/cy from config/reid/ufm/vehicles/<robot>_eo.yaml.
+    """Read fx/fy/cx/cy from config/reid/ufm/vehicles/<robot>_<modality>.yaml.
 
     Read from the shared calibration rather than copied into a servo config: a
     duplicated intrinsic that silently diverges from the real one is a classic.
@@ -119,19 +129,26 @@ class PersonServoNode(Node):
         # --- Parameters ---
         self.declare_parameter("robot_name", robot)
         self.declare_parameter("gimbal_namespace", f"/{robot}/gremsy")
+        # Which payload camera to servo on: eo | ir (on an aircraft, the one the run sends).
+        self.declare_parameter("modality", "eo")
+        modality = self.get_parameter("modality").value
+        if modality not in _MODALITY_DEFAULTS:
+            raise ValueError(f"modality must be one of {sorted(_MODALITY_DEFAULTS)}, got {modality!r}")
+        self._modality = modality
+        defaults = _MODALITY_DEFAULTS[modality]
         self.declare_parameter(
-            "intrinsics_file", f"{airlab}/config/reid/ufm/vehicles/{robot}_eo.yaml"
+            "intrinsics_file", f"{airlab}/config/reid/ufm/vehicles/{robot}_{modality}.yaml"
         )
 
         self.declare_parameter("servo_backend", "dry_run")
         self.declare_parameter("detector_backend", "rfdetr_trt")
         self.declare_parameter("image_source", "rtsp")
 
-        self.declare_parameter("rtsp_url", "rtsp://127.0.0.1:8554/eo")  # sender re-host, never the gimbal
+        self.declare_parameter("rtsp_url", defaults["rtsp_url"])
         self.declare_parameter("rtsp_latency_ms", 100)
         self.declare_parameter("rtsp_hardware_decode", False)
         # Detector frames at half the stream resolution, converted only when used.
-        self.declare_parameter("rtsp_half_resolution", False)
+        self.declare_parameter("rtsp_half_resolution", defaults["rtsp_half_resolution"])
         self.declare_parameter("replay_video", "")
         self.declare_parameter("replay_fps", 10.0)
 
@@ -143,7 +160,7 @@ class PersonServoNode(Node):
         # TensorRT engine built on the target from rfdetr's ONNX export (see README).
         self.declare_parameter(
             "rfdetr_engine",
-            f"{airlab}/weights/person_servo/engines/sm87-trt10.4/rfdetr_m_448x800.fp16.engine",
+            f"{airlab}/weights/person_servo/engines/sm87-trt10.4/{defaults['rfdetr_engine']}",
         )
         self.declare_parameter("rfdetr_confidence", 0.5)
 
@@ -271,6 +288,8 @@ class PersonServoNode(Node):
                 "Falling back to a nominal 1080p model; DO NOT fly on this."
             )
             self._base_intrinsics = Intrinsics(1378.08, 1375.56, 960.0, 540.0, 1920, 1080)
+        # gimbal_state.zoom_level is the EO zoom: it rescales EO frames, never IR ones.
+        self._zoom_scales_image = modality == "eo"
 
         # --- Control ---
         self._angle_ctrl = AngleStepController(
@@ -412,7 +431,8 @@ class PersonServoNode(Node):
 
         self._image_source.start()
         self.get_logger().info(
-            f"person_servo_node up: robot={self._robot} backend={self._backend.name} "
+            f"person_servo_node up: robot={self._robot} modality={self._modality} "
+            f"rtsp={p('rtsp_url').value} backend={self._backend.name} "
             f"detector={self._detector.name} gimbal_ns={self._gimbal_ns}"
         )
         if self._backend_name == "dry_run":
@@ -635,7 +655,7 @@ class PersonServoNode(Node):
 
     def _effective_intrinsics(self, width: int, height: int) -> Intrinsics:
         intr = self._base_intrinsics.scaled_to(width, height)
-        if self._zoom_valid():
+        if self._zoom_scales_image and self._zoom_valid():
             intr = intr.with_zoom(self._zoom_level)
         return intr
 
@@ -824,15 +844,16 @@ class PersonServoNode(Node):
         err_yaw, err_pitch = pixel_error_to_angles(err_x, err_y, intr)
 
         # Wrong intrinsics make an aggressive loop oscillate; derate instead.
-        derate = 1.0 if self._zoom_valid() else 0.5
+        derate = 1.0 if (self._zoom_valid() or not self._zoom_scales_image) else 0.5
         # The PIDs, limits and delay compensation work in ACHIEVED deg/s; the command
         # is that / factor. The gimbal's ~2 deg/s deadzone is on the COMMAND, so in
-        # achieved terms it shrinks with the factor.
+        # achieved terms it shrinks with the factor. The gimbal slows on EO zoom
+        # whichever camera is watched, so this applies to IR too.
         factor = (zoom_rate_factor(self._zoom_factor_table, self._zoom_level)
                   if self._zoom_valid() else 1.0)
         min_rate = self._min_rate_dps * factor
         max_rate = self._max_rate_dps
-        if self._rate_scale_with_zoom and self._zoom_valid():
+        if self._rate_scale_with_zoom and self._zoom_scales_image and self._zoom_valid():
             max_rate = max_rate / max(self._zoom_level, 1.0)
         max_rate = max(min_rate, max_rate)
         for pid in (self._pan_pid, self._tilt_pid):

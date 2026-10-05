@@ -13,6 +13,8 @@ Args:
   namespace      Node namespace (default /<drone>).
   config_file    Override the per-drone config file path.
   servo_backend  Override the backend (dry_run|track_touch|angle|rate|single_axis_rate).
+  modality       Payload camera to servo on: eo|ir (default eo).
+  rtsp_url       Override the stream URL (default: the node's per-modality re-host).
   deadman        Whether to start the watchdog (default true).
 """
 
@@ -30,6 +32,8 @@ def _launch_setup(context, *args, **kwargs):
     drone = LaunchConfiguration('drone').perform(context)
     namespace = LaunchConfiguration('namespace').perform(context) or f'/{drone}'
     servo_backend = LaunchConfiguration('servo_backend').perform(context)
+    modality = LaunchConfiguration('modality').perform(context)
+    rtsp_url = LaunchConfiguration('rtsp_url').perform(context)
 
     config_file = LaunchConfiguration('config_file').perform(context)
     if not config_file:
@@ -43,7 +47,9 @@ def _launch_setup(context, *args, **kwargs):
         print(f'[person_servo] WARNING: config file not found: {config_file} '
               f'(using node defaults).')
 
-    overrides = {'robot_name': drone}
+    overrides = {'robot_name': drone, 'modality': modality}
+    if rtsp_url:
+        overrides['rtsp_url'] = rtsp_url
     if servo_backend:
         overrides['servo_backend'] = servo_backend
     parameters.append(overrides)
@@ -78,6 +84,8 @@ def generate_launch_description():
         DeclareLaunchArgument('namespace', default_value=''),
         DeclareLaunchArgument('config_file', default_value=''),
         DeclareLaunchArgument('servo_backend', default_value=''),
+        DeclareLaunchArgument('modality', default_value='eo'),
+        DeclareLaunchArgument('rtsp_url', default_value=''),
         DeclareLaunchArgument('deadman', default_value='true'),
         OpaqueFunction(function=_launch_setup),
     ])
