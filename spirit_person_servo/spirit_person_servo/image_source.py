@@ -35,7 +35,7 @@ class ImageSource(Protocol):
 
 def build_rtsp_pipeline(
     rtsp_url: str, latency_ms: int = 100, use_hardware_decode: bool = False,
-    protocols: str = "tcp"
+    protocols: str = "tcp", raw_i420: bool = False
 ) -> str:
     """GStreamer pipeline string for cv2.VideoCapture(..., cv2.CAP_GSTREAMER).
 
@@ -65,12 +65,32 @@ def build_rtsp_pipeline(
         if use_hardware_decode
         else "avdec_h264 ! videoconvert"
     )
+    if raw_i420:
+        # No conversion in the pipeline: the consumer converts only the frames it uses.
+        decoder = decoder.replace(" ! videoconvert", "")
     return (
         f"rtspsrc location={rtsp_url} latency={latency_ms} protocols={protocols} ! "
         f"rtph264depay ! h264parse ! {decoder} ! "
-        "video/x-raw,format=BGR ! "
+        f"video/x-raw,format={'I420' if raw_i420 else 'BGR'} ! "
         "appsink sync=false max-buffers=1 drop=true"
     )
+
+
+def i420_to_half_bgr(frame: np.ndarray) -> np.ndarray:
+    """I420 (OpenCV's h*3/2 x w buffer) to BGR at half size, without a full-size convert.
+
+    The chroma planes are already half size, so every other luma pixel completes a
+    half-size YUV image: ~1.5 ms where a full 1080p convert is ~31 ms on the Orin NX.
+    """
+    import cv2
+
+    h, w = frame.shape[0] * 2 // 3, frame.shape[1]
+    q = h * w // 4
+    flat = frame.reshape(-1)
+    y = frame[:h:2, ::2]
+    u = flat[h * w:h * w + q].reshape(h // 2, w // 2)
+    v = flat[h * w + q:h * w + 2 * q].reshape(h // 2, w // 2)
+    return cv2.cvtColor(cv2.merge([y, u, v]), cv2.COLOR_YUV2BGR)
 
 
 class RtspImageSource:
@@ -86,8 +106,16 @@ class RtspImageSource:
         latency_ms: int = 100,
         use_hardware_decode: bool = True,
         reconnect_delay_s: float = 2.0,
+        half_resolution: bool = False,
     ) -> None:
-        self._pipeline = build_rtsp_pipeline(rtsp_url, latency_ms, use_hardware_decode)
+        # Half resolution reads raw I420 and converts on latest(), so the reader thread
+        # never converts the 2 in 3 frames the 10 Hz detector skips (spiritnx3,
+        # 2026-10-04: ~105% -> ~57% of a core for 1080p30, and the streaming thread no
+        # longer saturates and falls behind the live stream).
+        self._half = half_resolution
+        self._pipeline = build_rtsp_pipeline(
+            rtsp_url, latency_ms, use_hardware_decode, raw_i420=half_resolution
+        )
         self._rtsp_url = rtsp_url
         self._reconnect_delay_s = reconnect_delay_s
         self._capture = None
@@ -146,7 +174,8 @@ class RtspImageSource:
         with self._lock:
             if self._frame is None:
                 return None
-            return self._frame, self._stamp
+            frame, stamp = self._frame, self._stamp
+        return (i420_to_half_bgr(frame) if self._half else frame), stamp
 
     def stop(self) -> None:
         self._running.clear()
