@@ -310,3 +310,30 @@ class TestDivergenceGuard:
             guard.update(err, commanding=True)
         guard.update(err - 5.0, commanding=True)  # one improvement clears it
         assert guard.count == 0
+
+
+# ── zoom_rate_factor ─────────────────────────────────────────────────────────
+
+from spirit_person_servo.control import zoom_rate_factor  # noqa: E402
+
+SPIRITNX3 = [1.0, 1.04, 3.12, 0.148, 6.29, 0.061, 17.78, 0.032]
+
+
+def test_zoom_factor_hits_the_measured_points():
+    for z, f in zip(SPIRITNX3[0::2], SPIRITNX3[1::2]):
+        assert zoom_rate_factor(SPIRITNX3, z) == pytest.approx(f)
+
+
+def test_zoom_factor_is_monotonic_between_points():
+    fs = [zoom_rate_factor(SPIRITNX3, z / 10) for z in range(10, 180)]
+    assert all(a >= b for a, b in zip(fs, fs[1:]))
+
+
+def test_zoom_factor_holds_the_end_values_outside_the_table():
+    assert zoom_rate_factor(SPIRITNX3, 0.5) == pytest.approx(1.04)
+    assert zoom_rate_factor(SPIRITNX3, 40.0) == pytest.approx(0.032)
+
+
+def test_no_table_is_one_to_one():
+    assert zoom_rate_factor([], 6.0) == 1.0
+    assert zoom_rate_factor([0.0], 6.0) == 1.0

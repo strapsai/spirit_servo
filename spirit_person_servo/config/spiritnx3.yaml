@@ -108,6 +108,10 @@
     rate_ki: 0.05
     max_rate_dps: 4.0      # at zoom 1; divided by zoom_level (rate_scale_with_zoom)
     rate_scale_with_zoom: true
+    # Achieved/commanded rate vs zoom, measured on spiritnx3 2026-10-04 (FOLLOW, pan,
+    # 4 deg/s for 2 s each way): the gimbal itself slows rate commands as it zooms.
+    rate_zoom_factor_table: [1.0, 1.04, 3.12, 0.148, 6.29, 0.061, 17.78, 0.032]
+    max_command_dps: 20.0
     loop_delay_s: 0.5      # measured loop delay; commanded motion not yet in the frame
     max_accel_dps2: 30.0   # reach 8 deg/s in ~0.25 s
     min_rate_dps: 2.0      # deadzone compensation: the gimbal does not move below this

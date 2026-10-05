@@ -48,6 +48,7 @@ from .control import (
     Intrinsics,
     clamp,
     pixel_error_to_angles,
+    zoom_rate_factor,
 )
 from .detector import TimedDetector, make_detector
 from .image_source import ReplayImageSource, RtspImageSource
@@ -172,6 +173,12 @@ class PersonServoNode(Node):
         # max_rate_dps / zoom_level (floored at min_rate_dps): the same image speed at
         # every zoom, instead of the same angular speed.
         self.declare_parameter("rate_scale_with_zoom", False)
+        # Measured [zoom, achieved/commanded, ...]: the gimbal slows rate commands as it
+        # zooms, so the loop runs in achieved deg/s and sends rate / factor. [0.0] = 1:1.
+        self.declare_parameter("rate_zoom_factor_table", [0.0])
+        # Hard cap on any rate SENT, whatever the factor says (a wrong zoom reading
+        # must not turn into a fast slew).
+        self.declare_parameter("max_command_dps", 20.0)
 
         self.declare_parameter("tilt_min_deg", -90.0)
         self.declare_parameter("tilt_max_deg", 20.0)
@@ -307,6 +314,9 @@ class PersonServoNode(Node):
         self._max_rate_dps = float(p("max_rate_dps").value)
         self._loop_delay_s = float(p("loop_delay_s").value)
         self._rate_scale_with_zoom = bool(p("rate_scale_with_zoom").value)
+        self._zoom_factor_table = [float(v) for v in p("rate_zoom_factor_table").value]
+        self._min_rate_dps = float(p("min_rate_dps").value)
+        self._max_command_dps = float(p("max_command_dps").value)
         # (time, dt, pan, tilt): commanded rates in error space (before the signs).
         self._rate_history: deque = deque()
         self._last_pid_out = (0.0, 0.0)
@@ -523,6 +533,10 @@ class PersonServoNode(Node):
                     self._loop_delay_s = float(value)
                 elif prm.name == "rate_scale_with_zoom":
                     self._rate_scale_with_zoom = bool(value)
+                elif prm.name == "rate_zoom_factor_table":
+                    self._zoom_factor_table = [float(v) for v in value]
+                elif prm.name == "max_command_dps":
+                    self._max_command_dps = float(value)
                 elif prm.name == "max_accel_dps2":
                     self._pan_pid.max_accel_dps2 = self._tilt_pid.max_accel_dps2 = float(value)
                 elif prm.name == "enter_deadband_frac":
@@ -728,7 +742,7 @@ class PersonServoNode(Node):
             # min_rate_dps, and with ~0.5 s of loop delay that carries the gimbal straight
             # back out of the band -- the loop never settles (seen on spiritnx3 2026-09-23).
             # Only with min_rate_dps set; otherwise the small command near centre is harmless.
-            if self._pan_pid.min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband:
+            if self._min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband:
                 if not self._actuation_idle:
                     self._stop_motion("settling")
                 self._publish_state(idle=True)
@@ -762,7 +776,7 @@ class PersonServoNode(Node):
 
     def _gated(self) -> bool:
         """Per-axis AxisGate in use: two-axis rate control with deadzone compensation."""
-        return self._pan_pid.min_rate_dps > 0.0 and self._backend_name == "rate"
+        return self._min_rate_dps > 0.0 and self._backend_name == "rate"
 
     def _normalized(self, err_x: float, err_y: float) -> tuple[float, float]:
         """Pixel error as a fraction of the frame width, on both axes.
@@ -784,7 +798,7 @@ class PersonServoNode(Node):
         if self._backend_name == "single_axis_rate":
             axis = str(self.get_parameter("single_axis").value).strip().lower()
             return abs(err_y) if axis == "tilt" else abs(err_x)
-        if self._backend_name == "rate" and self._pan_pid.min_rate_dps > 0.0:
+        if self._backend_name == "rate" and self._min_rate_dps > 0.0:
             # Same criterion as the per-axis AxisGate: centred means BOTH axes inside the
             # band. With the 2-D magnitude, both axes could stop at ~35 px each (~50 px
             # combined) and the servo would sit still but never count as HOLD.
@@ -811,10 +825,19 @@ class PersonServoNode(Node):
 
         # Wrong intrinsics make an aggressive loop oscillate; derate instead.
         derate = 1.0 if self._zoom_valid() else 0.5
+        # The PIDs, limits and delay compensation work in ACHIEVED deg/s; the command
+        # is that / factor. The gimbal's ~2 deg/s deadzone is on the COMMAND, so in
+        # achieved terms it shrinks with the factor.
+        factor = (zoom_rate_factor(self._zoom_factor_table, self._zoom_level)
+                  if self._zoom_valid() else 1.0)
+        min_rate = self._min_rate_dps * factor
         max_rate = self._max_rate_dps
         if self._rate_scale_with_zoom and self._zoom_valid():
-            max_rate = max(self._pan_pid.min_rate_dps, max_rate / max(self._zoom_level, 1.0))
-        self._pan_pid.max_rate_dps = self._tilt_pid.max_rate_dps = max_rate
+            max_rate = max_rate / max(self._zoom_level, 1.0)
+        max_rate = max(min_rate, max_rate)
+        for pid in (self._pan_pid, self._tilt_pid):
+            pid.min_rate_dps = min_rate
+            pid.max_rate_dps = max_rate
 
         # Two-axis rate with deadzone compensation: an axis whose own error is already
         # inside the band stops (and forgets its integral) while the other finishes,
@@ -856,6 +879,9 @@ class PersonServoNode(Node):
             )
 
         self._last_pid_out = (pan_rate * self._pan_sign, tilt_rate * self._tilt_sign)
+        cap = self._max_command_dps
+        pan_rate = clamp(pan_rate / factor, -cap, cap)
+        tilt_rate = clamp(tilt_rate / factor, -cap, cap)
         target = self._target
         touch_x, touch_y = target.center if target is not None else (0.0, 0.0)
 

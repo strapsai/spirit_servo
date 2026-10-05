@@ -191,6 +191,27 @@ class AngleStepController:
         return target_pan, target_tilt
 
 
+def zoom_rate_factor(table: list[float], zoom: float) -> float:
+    """Gimbal speed actually achieved per unit commanded, at ``zoom``.
+
+    ``table`` is flat ``[zoom, factor, zoom, factor, ...]``, measured: the Gremsy
+    slows rate commands as it zooms in (spiritnx3 2026-10-04: 1.04 at 1x, 0.148 at
+    3.12x, 0.061 at 6.29x, 0.032 at 17.8x). Log-log interpolation; outside the table
+    the end value holds, which under-drives rather than over-drives. Empty = 1.0.
+    """
+    pts = sorted(zip(table[0::2], table[1::2]))
+    pts = [(z, f) for z, f in pts if z > 0.0 and f > 0.0]
+    if not pts or zoom <= 0.0:
+        return 1.0
+    if zoom <= pts[0][0]:
+        return pts[0][1]
+    for (z0, f0), (z1, f1) in zip(pts, pts[1:]):
+        if zoom <= z1:
+            a = (math.log(zoom) - math.log(z0)) / (math.log(z1) - math.log(z0))
+            return math.exp(math.log(f0) + a * (math.log(f1) - math.log(f0)))
+    return pts[-1][1]
+
+
 def wrap_deg_180(deg: float) -> float:
     """Wrap to [-180, 180]; the SDK rejects yaw setpoints outside that range."""
     return (deg + 180.0) % 360.0 - 180.0
