@@ -32,7 +32,7 @@ uint8 BACKEND_RATE=3
 # --- Target ---
 bool  has_target
 int32 target_track_id      # -1 when no target
-float32 bbox_x             # top-left, pixels, in decoded-frame coordinates
+float32 bbox_x             # top-left, pixels, at the intrinsics (camera native) resolution
 float32 bbox_y
 float32 bbox_w
 float32 bbox_h

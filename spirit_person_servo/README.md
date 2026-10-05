@@ -128,12 +128,29 @@ Develop with no drone at all — a video file instead of the camera:
 ```bash
 ros2 run spirit_person_servo person_servo_node --ros-args \
   -p image_source:=replay -p replay_video:=/path/to/clip.mp4 \
-  -p yolo_device:=cpu -p yolo_half:=false
+  -p detector_backend:=yolo -p yolo_device:=cpu -p yolo_half:=false
 ```
 
 Watch what it sees (`publish_debug_image: true`, then any image viewer on
 `~/debug_image/compressed`) — draws every track, the chosen one in green, and the
 deadband rectangle.
+
+### RF-DETR engine
+
+The default detector is RF-DETR Medium as a TensorRT FP16 engine (`detector_backend:
+rfdetr_trt`). Engines only load on the GPU and TensorRT version they were built with,
+so build one on each aircraft, inside the servo image. The ONNX comes from
+`rfdetr==1.11.1`: `RFDETRMedium().export(shape=(448, 800))` (needs `onnx<1.19`).
+
+```bash
+E=$AIRLAB_PATH/weights/person_servo/engines/sm87-trt10.4
+docker run --rm --runtime nvidia -v $AIRLAB_PATH:$AIRLAB_PATH \
+  --entrypoint /usr/src/tensorrt/bin/trtexec dtc/dtc:jp6.1-06e-person-servo \
+  --onnx=$AIRLAB_PATH/weights/person_servo/onnx/rfdetr_m_448x800.onnx \
+  --saveEngine=$E/rfdetr_m_448x800.fp16.engine --fp16 --memPoolSize=workspace:4096
+```
+
+Without the engine the node logs an error and runs YOLO11n instead.
 
 ---
 
@@ -171,7 +188,7 @@ Do not skip stages 0–3.
 | `control.py` | Control laws, deadband/hold, divergence guard. ROS-free, fully unit-tested. |
 | `tracker.py` | `Detection`/`Track` seam + BoT-SORT adapter. |
 | `target_selector.py` | Which track to follow. **The phase-2 seam.** |
-| `detector.py` | `PersonDetector` interface, YOLO backend, replay/null backends. |
+| `detector.py` | `PersonDetector` interface, RF-DETR TensorRT and YOLO backends, replay/null backends. |
 | `image_source.py` | RTSP and replay frame sources. |
 | `backends.py` | Actuation paths and the gimbal topic contract. |
 | `person_servo_node.py` | State machine, timers, telemetry. |

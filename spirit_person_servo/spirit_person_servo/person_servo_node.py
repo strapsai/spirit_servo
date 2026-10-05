@@ -20,6 +20,7 @@ import signal
 import os
 import threading
 import time
+from collections import deque
 from enum import IntEnum
 
 import rclpy
@@ -47,6 +48,7 @@ from .control import (
     Intrinsics,
     clamp,
     pixel_error_to_angles,
+    zoom_rate_factor,
 )
 from .detector import TimedDetector, make_detector
 from .image_source import ReplayImageSource, RtspImageSource
@@ -122,12 +124,14 @@ class PersonServoNode(Node):
         )
 
         self.declare_parameter("servo_backend", "dry_run")
-        self.declare_parameter("detector_backend", "yolo")
+        self.declare_parameter("detector_backend", "rfdetr_trt")
         self.declare_parameter("image_source", "rtsp")
 
-        self.declare_parameter("rtsp_url", "rtsp://192.168.70.23:8554/payload")
+        self.declare_parameter("rtsp_url", "rtsp://127.0.0.1:8554/eo")  # sender re-host, never the gimbal
         self.declare_parameter("rtsp_latency_ms", 100)
         self.declare_parameter("rtsp_hardware_decode", False)
+        # Detector frames at half the stream resolution, converted only when used.
+        self.declare_parameter("rtsp_half_resolution", False)
         self.declare_parameter("replay_video", "")
         self.declare_parameter("replay_fps", 10.0)
 
@@ -136,6 +140,12 @@ class PersonServoNode(Node):
         self.declare_parameter("yolo_confidence", 0.35)
         self.declare_parameter("yolo_device", "cuda:0")
         self.declare_parameter("yolo_half", True)
+        # TensorRT engine built on the target from rfdetr's ONNX export (see README).
+        self.declare_parameter(
+            "rfdetr_engine",
+            f"{airlab}/weights/person_servo/engines/sm87-trt10.4/rfdetr_m_448x800.fp16.engine",
+        )
+        self.declare_parameter("rfdetr_confidence", 0.5)
 
         self.declare_parameter("detect_rate_hz", 10.0)
         self.declare_parameter("control_rate_hz", 20.0)
@@ -156,6 +166,19 @@ class PersonServoNode(Node):
         self.declare_parameter("max_accel_dps2", 15.0)
         # Gimbal rate deadzone compensation (see AxisPID.min_rate_dps); 0 = off.
         self.declare_parameter("min_rate_dps", 0.0)
+        # Rate commanded within this window is not in the picture yet (video + detection
+        # + gimbal lag); it is subtracted from the measured error, so the loop stops on
+        # where the gimbal will be, not where the delayed frame shows it. 0 = off.
+        self.declare_parameter("loop_delay_s", 0.0)
+        # max_rate_dps / zoom_level (floored at min_rate_dps): the same image speed at
+        # every zoom, instead of the same angular speed.
+        self.declare_parameter("rate_scale_with_zoom", False)
+        # Measured [zoom, achieved/commanded, ...]: the gimbal slows rate commands as it
+        # zooms, so the loop runs in achieved deg/s and sends rate / factor. [0.0] = 1:1.
+        self.declare_parameter("rate_zoom_factor_table", [0.0])
+        # Hard cap on any rate SENT, whatever the factor says (a wrong zoom reading
+        # must not turn into a fast slew).
+        self.declare_parameter("max_command_dps", 20.0)
 
         self.declare_parameter("tilt_min_deg", -90.0)
         self.declare_parameter("tilt_max_deg", 20.0)
@@ -288,6 +311,15 @@ class PersonServoNode(Node):
             float(p("enter_deadband_frac").value), float(p("exit_deadband_frac").value)
         )
         self._divergence = DivergenceGuard()
+        self._max_rate_dps = float(p("max_rate_dps").value)
+        self._loop_delay_s = float(p("loop_delay_s").value)
+        self._rate_scale_with_zoom = bool(p("rate_scale_with_zoom").value)
+        self._zoom_factor_table = [float(v) for v in p("rate_zoom_factor_table").value]
+        self._min_rate_dps = float(p("min_rate_dps").value)
+        self._max_command_dps = float(p("max_command_dps").value)
+        # (time, dt, pan, tilt): commanded rates in error space (before the signs).
+        self._rate_history: deque = deque()
+        self._last_pid_out = (0.0, 0.0)
 
         # --- Perception ---
         self._tracker = BotSortTracker(frame_rate=int(float(p("detect_rate_hz").value)))
@@ -392,6 +424,11 @@ class PersonServoNode(Node):
     def _build_detector(self):
         p = self.get_parameter
         backend = p("detector_backend").value
+        if backend == "rfdetr_trt" and not os.path.isfile(p("rfdetr_engine").value):
+            self.get_logger().error(
+                f"rfdetr_engine {p('rfdetr_engine').value} not found; falling back to yolo"
+            )
+            backend = "yolo"
         if backend == "yolo":
             return make_detector(
                 "yolo",
@@ -400,6 +437,12 @@ class PersonServoNode(Node):
                 imgsz=int(p("yolo_imgsz").value),
                 device=p("yolo_device").value,
                 half=bool(p("yolo_half").value),
+            )
+        if backend == "rfdetr_trt":
+            return make_detector(
+                "rfdetr_trt",
+                engine=p("rfdetr_engine").value,
+                confidence=float(p("rfdetr_confidence").value),
             )
         return make_detector(backend)
 
@@ -438,6 +481,7 @@ class PersonServoNode(Node):
             p("rtsp_url").value,
             latency_ms=int(p("rtsp_latency_ms").value),
             use_hardware_decode=bool(p("rtsp_hardware_decode").value),
+            half_resolution=bool(p("rtsp_half_resolution").value),
         )
 
     def _subscribe_gimbal_state(self) -> None:
@@ -483,7 +527,16 @@ class PersonServoNode(Node):
                 elif prm.name == "rate_kd":
                     self._pan_pid.kd = self._tilt_pid.kd = float(value)
                 elif prm.name == "max_rate_dps":
+                    self._max_rate_dps = float(value)
                     self._pan_pid.max_rate_dps = self._tilt_pid.max_rate_dps = float(value)
+                elif prm.name == "loop_delay_s":
+                    self._loop_delay_s = float(value)
+                elif prm.name == "rate_scale_with_zoom":
+                    self._rate_scale_with_zoom = bool(value)
+                elif prm.name == "rate_zoom_factor_table":
+                    self._zoom_factor_table = [float(v) for v in value]
+                elif prm.name == "max_command_dps":
+                    self._max_command_dps = float(value)
                 elif prm.name == "max_accel_dps2":
                     self._pan_pid.max_accel_dps2 = self._tilt_pid.max_accel_dps2 = float(value)
                 elif prm.name == "enter_deadband_frac":
@@ -649,7 +702,11 @@ class PersonServoNode(Node):
                 self._enter_servoing("target acquired")
                 state = self._state
 
-            err_x, err_y = self._err_px
+            meas_x, meas_y = self._err_px
+            meas_mag = self._driven_error(*self._normalized(meas_x, meas_y))
+            # Stop and drive decisions use the error the gimbal is heading for; the
+            # divergence guard keeps judging what the camera actually sees.
+            err_x, err_y = self._predicted_error(meas_x, meas_y, now)
             norm_x, norm_y = self._normalized(err_x, err_y)
             err_mag = self._driven_error(norm_x, norm_y)
             # Both gates off = neither axis will be driven: that is centred, even when an
@@ -685,7 +742,7 @@ class PersonServoNode(Node):
             # min_rate_dps, and with ~0.5 s of loop delay that carries the gimbal straight
             # back out of the band -- the loop never settles (seen on spiritnx3 2026-09-23).
             # Only with min_rate_dps set; otherwise the small command near centre is harmless.
-            if self._pan_pid.min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband:
+            if self._min_rate_dps > 0.0 and err_mag < self._hold.enter_deadband:
                 if not self._actuation_idle:
                     self._stop_motion("settling")
                 self._publish_state(idle=True)
@@ -695,8 +752,10 @@ class PersonServoNode(Node):
             moved = self._backend.send(command)
             self._last_command = command
             self._actuation_idle = not moved
+            if moved:
+                self._rate_history.append((now, dt, *self._last_pid_out))
 
-            if self._divergence.update(err_mag, commanding=moved):
+            if self._divergence.update(meas_mag, commanding=moved):
                 self.get_logger().error(
                     "SIGN CONVENTION LIKELY INVERTED: error grew for "
                     f"{self._divergence.max_consecutive} consecutive cycles while commanding "
@@ -717,7 +776,7 @@ class PersonServoNode(Node):
 
     def _gated(self) -> bool:
         """Per-axis AxisGate in use: two-axis rate control with deadzone compensation."""
-        return self._pan_pid.min_rate_dps > 0.0 and self._backend_name == "rate"
+        return self._min_rate_dps > 0.0 and self._backend_name == "rate"
 
     def _normalized(self, err_x: float, err_y: float) -> tuple[float, float]:
         """Pixel error as a fraction of the frame width, on both axes.
@@ -739,12 +798,25 @@ class PersonServoNode(Node):
         if self._backend_name == "single_axis_rate":
             axis = str(self.get_parameter("single_axis").value).strip().lower()
             return abs(err_y) if axis == "tilt" else abs(err_x)
-        if self._backend_name == "rate" and self._pan_pid.min_rate_dps > 0.0:
+        if self._backend_name == "rate" and self._min_rate_dps > 0.0:
             # Same criterion as the per-axis AxisGate: centred means BOTH axes inside the
             # band. With the 2-D magnitude, both axes could stop at ~35 px each (~50 px
             # combined) and the servo would sit still but never count as HOLD.
             return max(abs(err_x), abs(err_y))
         return math.hypot(err_x, err_y)
+
+    def _predicted_error(self, err_x: float, err_y: float, now: float) -> tuple[float, float]:
+        """Pixel error minus the motion commanded in the last loop_delay_s (Smith-style)."""
+        while self._rate_history and now - self._rate_history[0][0] > self._loop_delay_s:
+            self._rate_history.popleft()
+        if self._loop_delay_s <= 0.0 or not self._rate_history:
+            return err_x, err_y
+        pan = sum(r[1] * r[2] for r in self._rate_history)
+        tilt = sum(r[1] * r[3] for r in self._rate_history)
+        intr = self._effective_intrinsics(*self._frame_size)
+        yaw, pitch = pixel_error_to_angles(err_x, err_y, intr)
+        return (intr.fx * math.tan(math.radians(yaw - pan)),
+                intr.fy * math.tan(math.radians(pitch - tilt)))
 
     def _compute_command(self, err_x: float, err_y: float, dt: float) -> ServoCommand:
         width, height = self._frame_size
@@ -753,6 +825,19 @@ class PersonServoNode(Node):
 
         # Wrong intrinsics make an aggressive loop oscillate; derate instead.
         derate = 1.0 if self._zoom_valid() else 0.5
+        # The PIDs, limits and delay compensation work in ACHIEVED deg/s; the command
+        # is that / factor. The gimbal's ~2 deg/s deadzone is on the COMMAND, so in
+        # achieved terms it shrinks with the factor.
+        factor = (zoom_rate_factor(self._zoom_factor_table, self._zoom_level)
+                  if self._zoom_valid() else 1.0)
+        min_rate = self._min_rate_dps * factor
+        max_rate = self._max_rate_dps
+        if self._rate_scale_with_zoom and self._zoom_valid():
+            max_rate = max_rate / max(self._zoom_level, 1.0)
+        max_rate = max(min_rate, max_rate)
+        for pid in (self._pan_pid, self._tilt_pid):
+            pid.min_rate_dps = min_rate
+            pid.max_rate_dps = max_rate
 
         # Two-axis rate with deadzone compensation: an axis whose own error is already
         # inside the band stops (and forgets its integral) while the other finishes,
@@ -793,6 +878,10 @@ class PersonServoNode(Node):
                 self._tilt_sign,
             )
 
+        self._last_pid_out = (pan_rate * self._pan_sign, tilt_rate * self._tilt_sign)
+        cap = self._max_command_dps
+        pan_rate = clamp(pan_rate / factor, -cap, cap)
+        tilt_rate = clamp(tilt_rate / factor, -cap, cap)
         target = self._target
         touch_x, touch_y = target.center if target is not None else (0.0, 0.0)
 
@@ -869,8 +958,11 @@ class PersonServoNode(Node):
         msg.target_track_id = int(target.track_id) if target is not None else -1
         if target is not None:
             det = target.detection
-            msg.bbox_x, msg.bbox_y = float(det.x), float(det.y)
-            msg.bbox_w, msg.bbox_h = float(det.w), float(det.h)
+            # In the camera's native pixels (the intrinsics' resolution), which is what
+            # the overlay draws on, whatever size the frames were decoded at.
+            k = self._base_intrinsics.image_w / max(float(self._frame_size[0]), 1.0)
+            msg.bbox_x, msg.bbox_y = float(det.x) * k, float(det.y) * k
+            msg.bbox_w, msg.bbox_h = float(det.w) * k, float(det.h) * k
             msg.detector_conf = float(det.confidence)
         msg.n_detections = int(self._n_detections)
 

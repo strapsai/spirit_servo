@@ -58,7 +58,7 @@
     # both axes ~1:1 above a ~2 deg/s deadzone (min_rate_dps covers both).
     servo_backend: "rate"
     single_axis: "pan"
-    detector_backend: "yolo"
+    detector_backend: "rfdetr_trt"   # rfdetr_engine derives from $AIRLAB_PATH; falls back to yolo if missing
     image_source: "rtsp"
 
     # The Jetson's sender_rtsp re-host (dtc-streams, shared media), NOT the gimbal: the
@@ -67,6 +67,9 @@
     rtsp_url: "rtsp://127.0.0.1:8554/eo"
     rtsp_latency_ms: 20           # loopback: no network jitter to absorb
     rtsp_hardware_decode: false   # nvvidconv needs EGL; headless drone has none
+    # Detection runs at 10 Hz on an 800x448 input: convert only the frames it uses, at
+    # 960x540, instead of every 1080p30 frame (~105% -> ~57% of a core).
+    rtsp_half_resolution: true
     replay_video: ""
     replay_fps: 10.0
 
@@ -99,9 +102,17 @@
     # Tuned 2026-09-23 on spiritnx3 (bench, parked) from ServoState telemetry: the gimbal
     # ignores rate commands below ~2 deg/s and lags them ~250 ms; the loop carries ~0.5 s
     # of delay in total, which caps kp near 1.5 (~45 deg phase margin).
-    rate_kp: 1.2           # 1.5 overshot with ~0.5 s loop delay
-    rate_ki: 0.15
-    max_rate_dps: 5.0      # was 3.0 (only 2-3 deg/s usable above the deadzone); 8.0 overshot ~100 px after a sidestep
+    # 2026-10-04: slower on purpose -- it has to work zoomed in, and overshoot is worse
+    # than a slow settle. Was kp 1.2 / ki 0.15 / max 5.
+    rate_kp: 0.8           # 1.5 overshot with ~0.5 s loop delay
+    rate_ki: 0.05
+    max_rate_dps: 4.0      # at zoom 1; divided by zoom_level (rate_scale_with_zoom)
+    rate_scale_with_zoom: true
+    # Achieved/commanded rate vs zoom, measured on spiritnx3 2026-10-04 (FOLLOW, pan,
+    # 4 deg/s for 2 s each way): the gimbal itself slows rate commands as it zooms.
+    rate_zoom_factor_table: [1.0, 1.04, 3.12, 0.148, 6.29, 0.061, 17.78, 0.032]
+    max_command_dps: 20.0
+    loop_delay_s: 0.5      # measured loop delay; commanded motion not yet in the frame
     max_accel_dps2: 30.0   # reach 8 deg/s in ~0.25 s
     min_rate_dps: 2.0      # deadzone compensation: the gimbal does not move below this
 
