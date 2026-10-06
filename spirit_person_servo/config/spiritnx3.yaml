@@ -58,18 +58,20 @@
     # both axes ~1:1 above a ~2 deg/s deadzone (min_rate_dps covers both).
     servo_backend: "rate"
     single_axis: "pan"
-    detector_backend: "rfdetr_trt"   # rfdetr_engine derives from $AIRLAB_PATH; falls back to yolo if missing
+    detector_backend: "rfdetr_trt"   # rfdetr_engine derives from $AIRLAB_PATH and the modality; falls back to yolo if missing
     image_source: "rtsp"
 
-    # The Jetson's sender_rtsp re-host (dtc-streams, shared media), NOT the gimbal: the
+    # modality (eo | ir) is the camera the run's streams yaml sends, passed in by
+    # launch/spirit/launch_person_servo.sh; it picks <drone>_<modality>.yaml intrinsics.
+    # rtsp_url is the Jetson's sender_rtsp re-host (dtc-streams), NOT the gimbal: the
     # Gremsy serves ONE RTSP session per mount, and a second client there gets 503 and
-    # knocks the EO downlink out. Needs dtc-streams on sender_rtsp (the RTSP default).
-    rtsp_url: "rtsp://127.0.0.1:8554/eo"
+    # knocks the downlink out. The launcher resolves it from the streams yaml; the node
+    # defaults are eo 127.0.0.1:8554/eo, ir 127.0.0.1:8555/ir.
+    # Both cameras convert only the frames the 10 Hz detector uses (raw I420 from
+    # GStreamer). rtsp_half_resolution defaults per modality: on for EO (960x540),
+    # off for the 640x512 IR.
     rtsp_latency_ms: 20           # loopback: no network jitter to absorb
     rtsp_hardware_decode: false   # nvvidconv needs EGL; headless drone has none
-    # Detection runs at 10 Hz on an 800x448 input: convert only the frames it uses, at
-    # 960x540, instead of every 1080p30 frame (~105% -> ~57% of a core).
-    rtsp_half_resolution: true
     replay_video: ""
     replay_fps: 10.0
 
