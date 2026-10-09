@@ -143,7 +143,9 @@
     # NOTE: cmd/gimbal_mode uses the PAYLOAD_CAMERA_GIMBAL_MODE_* enum
     # (0=OFF 1=LOCK 2=FOLLOW 3=MAPPING 4=RESET), which is NOT GimbalState.mode's
     # enum (0=UNSPECIFIED 1=FOLLOW 2=LOCK ...). Do not cross-assign them.
-    set_lock_mode: true
+    # ACFA 2026-10-08: false. Switching the Gremsy to LOCK on arm swung the camera
+    # to the horizon ~5 s into every inspection; the pointer aims in FOLLOW+body.
+    set_lock_mode: false
     restore_gimbal_mode: 2      # FOLLOW
 
     publish_debug_image: false
