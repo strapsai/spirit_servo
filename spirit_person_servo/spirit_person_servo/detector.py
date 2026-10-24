@@ -153,12 +153,106 @@ class YoloTorchDetector:
         ]
 
 
+class RfDetrTrtDetector:
+    """RF-DETR (COCO) as a TensorRT engine built on the target from rfdetr's ONNX export.
+
+    Engine I/O: input [1,3,H,W] ImageNet-normalised RGB; dets [1,Q,4] normalised
+    cxcywh; labels [1,Q,91] logits (COCO-91 slots, no background; person = 1).
+    """
+
+    _MEAN = (0.485, 0.456, 0.406)
+    _STD = (0.229, 0.224, 0.225)
+
+    def __init__(
+        self,
+        engine: str,
+        confidence: float = 0.5,
+        device: str = "cuda:0",
+        person_class_id: int = 1,
+        max_detections: int = 32,
+    ) -> None:
+        self._engine_path = engine
+        self._confidence = confidence
+        self._device = device
+        self._person = person_class_id
+        self._max_detections = max_detections
+        self._context = None
+
+    @property
+    def name(self) -> str:
+        import os
+
+        return f"rfdetr_trt({os.path.basename(self._engine_path)})"
+
+    def _ensure_loaded(self) -> None:
+        if self._context is not None:
+            return
+        import tensorrt as trt
+        import torch
+
+        logger = trt.Logger(trt.Logger.WARNING)
+        with open(self._engine_path, "rb") as f:
+            self._engine = trt.Runtime(logger).deserialize_cuda_engine(f.read())
+        if self._engine is None:
+            raise RuntimeError(f"cannot load TensorRT engine {self._engine_path}")
+        self._context = self._engine.create_execution_context()
+        self._torch = torch
+        self._stream = torch.cuda.Stream(device=self._device)
+        self._buffers = {}
+        for i in range(self._engine.num_io_tensors):
+            n = self._engine.get_tensor_name(i)
+            dtype = torch.from_numpy(
+                np.empty(0, dtype=trt.nptype(self._engine.get_tensor_dtype(n)))
+            ).dtype
+            t = torch.empty(tuple(self._engine.get_tensor_shape(n)), dtype=dtype, device=self._device)
+            self._context.set_tensor_address(n, t.data_ptr())
+            self._buffers[n] = t
+        _, _, self._h, self._w = self._buffers["input"].shape
+        self._mean = torch.tensor(self._MEAN, device=self._device).view(3, 1, 1)
+        self._std = torch.tensor(self._STD, device=self._device).view(3, 1, 1)
+
+    def warmup(self) -> None:
+        self._ensure_loaded()
+        for _ in range(3):
+            self.detect(np.zeros((self._h, self._w, 3), dtype=np.uint8))
+
+    def detect(self, frame_bgr: np.ndarray) -> list[Detection]:
+        import cv2
+
+        self._ensure_loaded()
+        torch = self._torch
+        fh, fw = frame_bgr.shape[:2]
+        # INTER_LINEAR is half-pixel bilinear without antialiasing, as rfdetr resizes.
+        rgb = cv2.cvtColor(cv2.resize(frame_bgr, (self._w, self._h)), cv2.COLOR_BGR2RGB)
+        with torch.cuda.stream(self._stream):
+            x = torch.from_numpy(rgb).to(self._device, non_blocking=True)
+            x = (x.permute(2, 0, 1).float().div_(255.0) - self._mean) / self._std
+            self._buffers["input"].copy_(x.unsqueeze(0))
+            self._context.execute_async_v3(self._stream.cuda_stream)
+            scores = self._buffers["labels"][0, :, self._person].float().sigmoid()
+            keep = (scores > self._confidence).nonzero().flatten()
+            keep = keep[scores[keep].argsort(descending=True)][: self._max_detections]
+            boxes = self._buffers["dets"][0, keep].float().cpu().numpy()
+            conf = scores[keep].cpu().numpy()
+        return [
+            Detection(
+                x=float((cx - bw / 2) * fw),
+                y=float((cy - bh / 2) * fh),
+                w=float(bw * fw),
+                h=float(bh * fh),
+                confidence=float(c),
+            )
+            for (cx, cy, bw, bh), c in zip(boxes, conf)
+        ]
+
+
 # Backends are registered rather than if/elif'd so adding GroundingDINO is a
 # single entry plus its module, with no edits to the node.
 DetectorFactory = Callable[..., PersonDetector]
 
 _REGISTRY: dict[str, DetectorFactory] = {
     "yolo": YoloTorchDetector,
+    "rfdetr_trt": RfDetrTrtDetector,
     "null": NullDetector,
 }
 
